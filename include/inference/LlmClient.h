@@ -1,0 +1,65 @@
+#pragma once
+
+#include <QObject>
+#include <QJsonArray>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QString>
+
+class LlmClient : public QObject {
+    Q_OBJECT
+
+public:
+    explicit LlmClient(
+        QNetworkAccessManager *networkManager,
+        QObject *parent = nullptr
+    );
+
+    struct Request {
+        QString url;
+        QJsonArray messages;
+        QString model = QStringLiteral("local-model");
+        double temperature = 0.7;
+        int timeoutMs = 120000;
+    };
+
+    void sendRequest(const Request &request);
+
+    void abortRequest();
+
+    bool isActive() const;
+
+signals:
+    void deltaReceived(
+        const QString &text
+    );
+
+    void requestFinished();
+
+    void requestError(
+        const QString &error
+    );
+
+private slots:
+    void onReadyRead();
+
+    void onFinished();
+
+    void onError(
+        QNetworkReply::NetworkError error
+    );
+
+private:
+    void processLine(
+        const QByteArray &line
+    );
+
+private:
+    QNetworkAccessManager *m_networkManager = nullptr;
+    QNetworkReply *m_currentReply = nullptr;
+
+    QByteArray m_streamBuffer;
+
+    bool m_requestFailed = false;
+    bool m_abortRequested = false;
+};

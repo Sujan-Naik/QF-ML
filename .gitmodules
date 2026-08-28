@@ -1,0 +1,3 @@
+[submodule "external/parakeet.cpp"]
+	path = external/parakeet.cpp
+	url = https://github.com/mudler/parakeet.cpp.git
