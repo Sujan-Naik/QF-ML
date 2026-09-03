@@ -1,7 +1,6 @@
 #include "../../include/inference/InferenceService.h"
 
 #include "../include/inference/LlmClient.h"
-#include "../include/vision/OcrService.h"
 #include "../include/voice/TtsManager.h"
 #include "../include/voice/WhisperTranscriber.h"
 #include "../include/voice/ParakeetTranscriber.h"
@@ -13,6 +12,7 @@
 #include <QNetworkProxy>
 #include <QDebug>
 
+#include "app/QfPaths.h"
 #include "inference/LlamaManager.h"
 #include "inference/ModelManager.h"
 
@@ -888,56 +888,34 @@ void InferenceService::onTtsServerReady() {
 }
 
 
-// -----------------------------------------------------------------------------
-// OCR
-// -----------------------------------------------------------------------------
-
-QString InferenceService::extractText(
-    const QImage &image
-) {
-    return OcrService::extractText(
-        image
-    );
-}
-
 
 QString InferenceService::resolveSttModelPath(
     const QString &requestedPath
 ) const {
     const QString backend =
-            qEnvironmentVariable(
-                "TALOS_STT_BACKEND",
-                "parakeet"
-            ).trimmed().toLower();
+            qEnvironmentVariable("QF_STT_BACKEND", "parakeet")
+                .trimmed().toLower();
 
     // -------------------------------------------------------------------------
     // 1. Explicit environment override
     // -------------------------------------------------------------------------
 
     const QString environmentPath =
-            qEnvironmentVariable(
-                "TALOS_STT_MODEL"
-            ).trimmed();
+            qEnvironmentVariable("QF_STT_MODEL").trimmed();
 
     if (!environmentPath.isEmpty()) {
-        const QFileInfo info(
-            environmentPath
-        );
+        const QFileInfo info(environmentPath);
 
-        if (
-            info.exists() &&
-            info.isFile() &&
-            info.isReadable()
-        ) {
+        if (info.exists() && info.isFile() && info.isReadable()) {
             qDebug()
-                    << "[InferenceService] Using TALOS_STT_MODEL:"
+                    << "[InferenceService] Using QF_STT_MODEL:"
                     << info.absoluteFilePath();
 
             return info.absoluteFilePath();
         }
 
         qWarning()
-                << "[InferenceService] TALOS_STT_MODEL is invalid:"
+                << "[InferenceService] QF_STT_MODEL is invalid:"
                 << environmentPath;
     }
 
@@ -954,33 +932,21 @@ QString InferenceService::resolveSttModelPath(
     // -------------------------------------------------------------------------
 
     if (!requestedPath.trimmed().isEmpty()) {
-        const QFileInfo info(
-            requestedPath
-        );
+        const QFileInfo info(requestedPath);
 
-        if (
-            info.exists() &&
-            info.isFile() &&
-            info.isReadable()
-        ) {
-            const QString suffix =
-                    info.suffix().toLower();
+        if (info.exists() && info.isFile() && info.isReadable()) {
+            const QString suffix = info.suffix().toLower();
 
             const bool validForWhisper =
                     backend == QStringLiteral("whisper") &&
-                    (
-                        suffix == QStringLiteral("bin") ||
-                        suffix == QStringLiteral("gguf")
-                    );
+                    (suffix == QStringLiteral("bin") ||
+                     suffix == QStringLiteral("gguf"));
 
             const bool validForParakeet =
                     backend == QStringLiteral("parakeet") &&
                     suffix == QStringLiteral("gguf");
 
-            if (
-                validForWhisper ||
-                validForParakeet
-            ) {
+            if (validForWhisper || validForParakeet) {
                 qDebug()
                         << "[InferenceService] Using requested STT model:"
                         << info.absoluteFilePath();
@@ -997,33 +963,19 @@ QString InferenceService::resolveSttModelPath(
     }
 
     // -------------------------------------------------------------------------
-    // 3. Backend-specific default
+    // 3. Backend-specific default (shared, namespace-scoped directory)
     // -------------------------------------------------------------------------
 
     QString modelPath;
 
-    if (
-        backend == QStringLiteral("parakeet")
-    ) {
+    if (backend == QStringLiteral("parakeet")) {
         modelPath =
-                QDir(
-                    QCoreApplication::applicationDirPath()
-                ).filePath(
-                    QStringLiteral(
-                        "models/tdt-1.1b-f16.gguf"
-                    )
-                );
-    } else if (
-        backend == QStringLiteral("whisper")
-    ) {
+                QDir(QFPaths::sttModelsDir())
+                    .filePath(QStringLiteral("tdt-1.1b-f16.gguf"));
+    } else if (backend == QStringLiteral("whisper")) {
         modelPath =
-                QDir(
-                    QCoreApplication::applicationDirPath()
-                ).filePath(
-                    QStringLiteral(
-                        "ggml-tiny.en.bin"
-                    )
-                );
+                QDir(QFPaths::whisperModelsDir())
+                    .filePath(QStringLiteral("ggml-tiny.en.bin"));
     } else {
         qWarning()
                 << "[InferenceService] Unknown STT backend:"
@@ -1036,15 +988,9 @@ QString InferenceService::resolveSttModelPath(
     // 4. Validate backend default
     // -------------------------------------------------------------------------
 
-    const QFileInfo info(
-        modelPath
-    );
+    const QFileInfo info(modelPath);
 
-    if (
-        info.exists() &&
-        info.isFile() &&
-        info.isReadable()
-    ) {
+    if (info.exists() && info.isFile() && info.isReadable()) {
         qDebug()
                 << "[InferenceService] Using default"
                 << backend

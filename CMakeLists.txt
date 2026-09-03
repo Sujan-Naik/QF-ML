@@ -6,7 +6,6 @@ if (POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif ()
 
-
 # ============================================================================
 # Qt
 # ============================================================================
@@ -43,6 +42,7 @@ set(
         CACHE BOOL ""
         FORCE
 )
+
 set(
         WHISPER_BUILD_TESTS
         OFF
@@ -50,11 +50,11 @@ set(
         FORCE
 )
 
-# Whisper's GGML must not be a shared library in the QF-ML process.
+# Whisper's GGML remains static.
 #
-# Parakeet contains its own GGML implementation. Having both implementations
-# exported as shared/global symbols causes gguf_* calls from Parakeet to resolve
-# to Whisper's GGML.
+# Parakeet contains its own GGML implementation. Keeping Whisper's GGML
+# static and disabling dynamic backend loading avoids introducing another
+# shared GGML implementation into the process.
 set(
         BUILD_SHARED_LIBS
         OFF
@@ -86,21 +86,14 @@ FetchContent_MakeAvailable(whisper)
 # 2. Parakeet.cpp
 # =============================================================================
 #
-# Parakeet MUST remain an ExternalProject.
+# Parakeet remains an ExternalProject.
 #
-# It vendors its own GGML and cannot safely be added directly to the QF-ML
-# CMake target graph because Whisper also vendors GGML.
+# It vendors its own GGML and is intentionally built independently from
+# Whisper's GGML.
 #
-# Parakeet's own CMakeLists.txt links GGML as PUBLIC, which re-exports GGML's
-# symbols (including Vulkan backend registration symbols) from libparakeet.so.
-# When that happens alongside Whisper's statically-linked GGML in the same
-# process, symbol interposition/duplicate-registration issues can occur.
-#
-# Parakeet is a submodule and is not writable in-tree, so the fix is applied
-# via PATCH_COMMAND against the checked-out submodule source immediately
-# before ExternalProject configures it. This flips ggml linkage from PUBLIC
-# to PRIVATE. It does not touch any other line and is idempotent (sed with
-# a no-op match on subsequent re-configures).
+# The Parakeet shared library is linked with -Bsymbolic on ELF platforms so
+# references to its own bundled GGML symbols remain bound to that library.
+# This prevents symbol interposition from Whisper's GGML in the main process.
 # =============================================================================
 
 include(ExternalProject)
@@ -115,6 +108,17 @@ if (NOT EXISTS "${PARAKEET_SOURCE_DIR}/CMakeLists.txt")
     message(
             FATAL_ERROR
             "Parakeet.cpp not found at ${PARAKEET_SOURCE_DIR}"
+    )
+
+endif ()
+
+if (NOT EXISTS "${PARAKEET_SOURCE_DIR}/third_party/ggml/CMakeLists.txt")
+
+    message(
+            FATAL_ERROR
+            "Parakeet GGML submodule is missing.\n"
+            "Run:\n"
+            "  git submodule update --init --recursive external/parakeet.cpp"
     )
 
 endif ()
@@ -151,25 +155,20 @@ else ()
     )
 
 endif ()
+
 # -----------------------------------------------------------------------------
 # Patch Parakeet's vendored GGML for older Vulkan-Headers
 # -----------------------------------------------------------------------------
 #
-# Debian 12 ships Vulkan-Headers 1.3.239, which does not provide the Vulkan-Hpp
-# types for VK_EXT_layer_settings:
+# Debian 12 / older Vulkan-Hpp environments may not expose:
 #
 #   vk::LayerSettingEXT
 #   vk::LayerSettingTypeEXT
 #   vk::LayerSettingsCreateInfoEXT
 #
-# The GGML Vulkan backend uses these types unconditionally even though the
-# extension itself is optional at runtime.
-#
-# This patch wraps the layer-settings code in #ifdef VK_EXT_layer_settings so
-# GGML Vulkan can still build and run without that optional extension.
-#
-# The patch is applied through ExternalProject_Add(), so the git submodule
-# itself does not need to be edited manually.
+# The original QF-ML workaround guards the optional
+# VK_EXT_layer_settings-dependent code and falls back to ordinary Vulkan
+# instance creation when that extension is unavailable at compile time.
 # -----------------------------------------------------------------------------
 
 set(
@@ -253,8 +252,17 @@ file(
         "${PARAKEET_SOURCE_DIR}/third_party/ggml/src/ggml-vulkan/ggml-vulkan.cpp"
         "${_content}"
 )
+
+message(
+        STATUS
+        "Applied Parakeet Vulkan compatibility workaround."
+)
 ]=]
 )
+
+# -----------------------------------------------------------------------------
+# Parakeet ExternalProject
+# -----------------------------------------------------------------------------
 
 ExternalProject_Add(
         parakeet_external
@@ -274,25 +282,38 @@ ExternalProject_Add(
         CMAKE_ARGS
 
         "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
-
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
 
         # Build shared Parakeet library.
         "-DPARAKEET_SHARED=ON"
 
+        # No additional Parakeet executables.
         "-DPARAKEET_BUILD_TESTS=OFF"
         "-DPARAKEET_BUILD_CLI=OFF"
         "-DPARAKEET_BUILD_SERVER=OFF"
 
-        # Keep vendored GGML static.
+        # Keep Parakeet's bundled GGML static inside Parakeet.
         "-DBUILD_SHARED_LIBS=OFF"
 
         # Do not dynamically load GGML backends.
         "-DGGML_BACKEND_DL=OFF"
 
-        # GPU / Vulkan.
+        # Vulkan acceleration.
         "-DPARAKEET_GGML_VULKAN=ON"
         "-DGGML_VULKAN=ON"
+
+        # ---------------------------------------------------------------------
+        # Critical ELF symbol isolation.
+        #
+        # Parakeet and Whisper each contain GGML. On Linux, without symbol
+        # binding, references from libparakeet.so to gguf_*/ggml_* symbols may
+        # be interposed by Whisper's GGML in the executable.
+        #
+        # -Bsymbolic binds references to symbols defined inside libparakeet.so
+        # to the definitions in that same shared object.
+        # ---------------------------------------------------------------------
+
+        "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-Bsymbolic"
 
         BUILD_COMMAND
         ${CMAKE_COMMAND}
@@ -313,6 +334,7 @@ ExternalProject_Add(
         UPDATE_DISCONNECTED
         TRUE
 )
+
 # -----------------------------------------------------------------------------
 # Imported Parakeet target
 # -----------------------------------------------------------------------------
@@ -464,12 +486,49 @@ set_target_properties(
 )
 
 # =============================================================================
-# 4. Model Downloader
+# 4. Shared QF data directory
 # =============================================================================
+
+if (WIN32)
+
+    set(
+            QF_DATA_ROOT
+            "$ENV{LOCALAPPDATA}/qf-inference"
+    )
+
+elseif (APPLE)
+
+    set(
+            QF_DATA_ROOT
+            "$ENV{HOME}/Library/Application Support/qf-inference"
+    )
+
+else ()
+
+    if (
+            DEFINED ENV{XDG_DATA_HOME}
+            AND NOT "$ENV{XDG_DATA_HOME}" STREQUAL ""
+    )
+
+        set(
+                QF_DATA_ROOT
+                "$ENV{XDG_DATA_HOME}/qf-inference"
+        )
+
+    else ()
+
+        set(
+                QF_DATA_ROOT
+                "$ENV{HOME}/.local/share/qf-inference"
+        )
+
+    endif ()
+
+endif ()
 
 set(
         MODELS_DIR
-        "${CMAKE_BINARY_DIR}/models"
+        "${QF_DATA_ROOT}/models"
 )
 
 file(
@@ -477,9 +536,14 @@ file(
         "${MODELS_DIR}"
 )
 
-# -----------------------------------------------------------------------------
-# Hugging Face CLI detection
-# -----------------------------------------------------------------------------
+message(
+        STATUS
+        "QF shared data root: ${QF_DATA_ROOT}"
+)
+
+# =============================================================================
+# 4A. Hugging Face CLI detection
+# =============================================================================
 
 find_program(
         HF_CLI
@@ -518,9 +582,9 @@ else ()
 
 endif ()
 
-# -----------------------------------------------------------------------------
-# Generic downloader
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 4B. Generic downloader
+# =============================================================================
 
 function(
         download_model
@@ -666,15 +730,9 @@ function(
 
 endfunction()
 
-# -----------------------------------------------------------------------------
-# Hugging Face downloader
-#
-# When hf is available:
-#
-#   HF_XET_HIGH_PERFORMANCE=1
-#
-# is used for large model transfers.
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 4C. Hugging Face downloader
+# =============================================================================
 
 function(
         download_hf_model
@@ -731,7 +789,7 @@ function(
 
         message(
                 STATUS
-                "Downloading ${description} using Hugging Face Xet..."
+                "Downloading ${description} using Hugging Face..."
         )
 
         execute_process(
@@ -843,28 +901,28 @@ function(
 endfunction()
 
 # =============================================================================
-# 4A. Whisper model
+# 4D. Whisper model
 # =============================================================================
 
 set(
-        MODEL_NAME
+        WHISPER_MODEL_NAME
         "ggml-tiny.en.bin"
 )
 
 set(
-        MODEL_PATH
-        "${CMAKE_BINARY_DIR}/${MODEL_NAME}"
+        WHISPER_MODEL_PATH
+        "${MODELS_DIR}/whisper/${WHISPER_MODEL_NAME}"
 )
 
 download_hf_model(
         "ggerganov/whisper.cpp"
-        "${MODEL_NAME}"
-        "${MODEL_PATH}"
-        "Whisper model ${MODEL_NAME}"
+        "${WHISPER_MODEL_NAME}"
+        "${WHISPER_MODEL_PATH}"
+        "Whisper model ${WHISPER_MODEL_NAME}"
 )
 
 # =============================================================================
-# 4B. Parakeet model
+# 4E. Parakeet model
 # =============================================================================
 
 set(
@@ -874,11 +932,11 @@ set(
 
 set(
         PARAKEET_MODEL_PATH
-        "${MODELS_DIR}/${PARAKEET_MODEL_NAME}"
+        "${MODELS_DIR}/stt/${PARAKEET_MODEL_NAME}"
 )
 
 # Approximately 2.4 GB.
-# Reject the previously encountered ~1.2 GB truncated download.
+# Reject the previously encountered truncated download.
 set(
         PARAKEET_MODEL_MIN_SIZE
         2400000000
@@ -971,26 +1029,20 @@ if (NOT PARAKEET_MODEL_VALID)
 endif ()
 
 # =============================================================================
-# 4C. openWakeWord models
+# 4F. openWakeWord models
 # =============================================================================
 
 set(
         OWW_URLS
-
         "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx"
-
         "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx"
-
         "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.onnx"
 )
 
 set(
         OWW_FILES
-
         "melspectrogram.onnx"
-
         "embedding_model.onnx"
-
         "hey_jarvis.onnx"
 )
 
@@ -1028,7 +1080,7 @@ foreach (
 
     set(
             DEST_PATH
-            "${MODELS_DIR}/${MODEL_FILE}"
+            "${MODELS_DIR}/wakeword/${MODEL_FILE}"
     )
 
     download_model(
@@ -1096,14 +1148,17 @@ if (NOT LEPTONICA_FOUND)
 endif ()
 
 # =============================================================================
-# 6. QF-ML executable
+# 6. qf-inference
+# =============================================================================
+#
+# Reusable inference/model-management library.
+#
+# No main() lives here.
 # =============================================================================
 
-qt_add_executable(
-        QF-ML
-
-        src/main.cpp
-
+add_library(
+        qf-inference
+        STATIC
 
         include/inference/LlmClient.h
         src/inference/LlmClient.cpp
@@ -1111,105 +1166,211 @@ qt_add_executable(
         include/inference/InferenceService.h
         src/inference/InferenceService.cpp
 
-        include/vision/CaptureOverlay.h
-        src/vision/CaptureOverlay.cpp
+        include/inference/LlamaManager.h
+        src/inference/LlamaManager.cpp
 
-        include/voice/AudioRecorder.h
+        include/inference/ModelManager.h
+        src/inference/ModelManager.cpp
+
+        include/voice/ITranscriber.h
 
         include/voice/WhisperTranscriber.h
 
         include/voice/ParakeetTranscriber.h
         src/voice/ParakeetTranscriber.cpp
 
-        include/voice/ITranscriber.h
-
+        include/voice/AudioRecorder.h
         include/voice/WakeWordDetector.h
 
-        include/vision/OcrService.h
-        src/vision/OcrService.cpp
-
-        src/voice/TtsManager.cpp
         include/voice/TtsManager.h
+        src/voice/TtsManager.cpp
 
-        src/inference/LlamaManager.cpp
-        include/inference/LlamaManager.h
-
-        src/inference/ModelManager.cpp
-        include/inference/ModelManager.h
-
-        src/ui/ModelDialog.cpp
         include/ui/ModelDialog.h
+        src/ui/ModelDialog.cpp
 
         include/ui/QuantizationGuideDialog.h
         src/ui/QuantizationGuideDialog.cpp
 
-        include/app/RuntimeManager.h
-        src/app/RuntimeManager.cpp
+        include/app/QfPaths.h
 )
 
-
 target_include_directories(
-        QF-ML
+        qf-inference
+
+        PUBLIC
+
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
 
         PRIVATE
 
         ${TESSERACT_INCLUDE_DIRS}
-
         ${LEPTONICA_INCLUDE_DIRS}
 
         ${whisper_SOURCE_DIR}
 
         "${PARAKEET_INCLUDE_DIR}"
 
-        ${ONNXRUNTIME_INCLUDE_DIR}
-
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${ONNXRUNTIME_INCLUDE_DIR}"
 )
 
-# =============================================================================
-# 9. Libraries
-# =============================================================================
-
 target_link_libraries(
-        QF-ML
+        qf-inference
 
-        PRIVATE
+        PUBLIC
 
         Qt6::Core
         Qt6::Gui
         Qt6::Widgets
         Qt6::Network
         Qt6::Multimedia
-        Qt6::WebEngineWidgets
-        Qt6::WebEngineCore
-        Qt6::WebChannel
         Qt6::TextToSpeech
 
+        PRIVATE
+
         whisper
-
         Parakeet::Parakeet
-
         ONNXRuntime::ONNXRuntime
 
         ${TESSERACT_LIBRARIES}
-
         ${LEPTONICA_LIBRARIES}
 )
 
+# On Linux, prevent symbols from static archives from being unnecessarily
+# exported by the final executable link.
 if (UNIX AND NOT APPLE)
 
     target_link_options(
-            QF-ML
+            qf-inference
             PRIVATE
             "-Wl,--exclude-libs,ALL"
     )
 
 endif ()
 
+add_dependencies(
+        qf-inference
+        Parakeet::Parakeet
+)
+
+# =============================================================================
+# 7. qf-ml-demo
+# =============================================================================
+#
+# Thin development/sanity-check executable.
+# =============================================================================
+
+qt_add_executable(
+        qf-ml-demo
+
+        src/main.cpp
+
+        include/app/RuntimeManager.h
+        src/app/RuntimeManager.cpp
+)
+
+target_link_libraries(
+        qf-ml-demo
+
+        PRIVATE
+
+        qf-inference
+
+        Qt6::WebEngineWidgets
+        Qt6::WebEngineCore
+        Qt6::WebChannel
+)
+
+add_dependencies(
+        qf-ml-demo
+        Parakeet::Parakeet
+)
+
+# =============================================================================
+# 8. Runtime deployment
+# =============================================================================
+
+if (WIN32)
+
+    add_custom_command(
+            TARGET qf-ml-demo
+            POST_BUILD
+
+            COMMAND
+            ${CMAKE_COMMAND}
+            -E
+            copy_if_different
+            "${ONNXRUNTIME_DLL}"
+            "$<TARGET_FILE_DIR:qf-ml-demo>/onnxruntime.dll"
+    )
+
+elseif (APPLE)
+
+    foreach (
+            dylib
+            ${ONNXRUNTIME_DYLIBS}
+    )
+
+        add_custom_command(
+                TARGET qf-ml-demo
+                POST_BUILD
+
+                COMMAND
+                ${CMAKE_COMMAND}
+                -E
+                copy_if_different
+                "${dylib}"
+                "$<TARGET_FILE_DIR:qf-ml-demo>/"
+        )
+
+    endforeach ()
+
+else ()
+
+    foreach (
+            solib
+            ${ONNXRUNTIME_SOLIBS}
+    )
+
+        add_custom_command(
+                TARGET qf-ml-demo
+                POST_BUILD
+
+                COMMAND
+                ${CMAKE_COMMAND}
+                -E
+                copy_if_different
+                "${solib}"
+                "$<TARGET_FILE_DIR:qf-ml-demo>/"
+        )
+
+    endforeach ()
+
+endif ()
+
+# -----------------------------------------------------------------------------
+# Copy Parakeet shared library next to executable.
+# -----------------------------------------------------------------------------
+
+add_custom_command(
+        TARGET qf-ml-demo
+        POST_BUILD
+
+        COMMAND
+        ${CMAKE_COMMAND}
+        -E
+        copy_if_different
+        "$<TARGET_FILE:Parakeet::Parakeet>"
+        "$<TARGET_FILE_DIR:qf-ml-demo>"
+)
+
+# -----------------------------------------------------------------------------
+# RPATH
+# -----------------------------------------------------------------------------
+
 if (UNIX AND NOT APPLE)
 
     set_target_properties(
-            QF-ML
+            qf-ml-demo
 
             PROPERTIES
 
@@ -1223,7 +1384,7 @@ if (UNIX AND NOT APPLE)
 elseif (APPLE)
 
     set_target_properties(
-            QF-ML
+            qf-ml-demo
 
             PROPERTIES
 
@@ -1235,125 +1396,3 @@ elseif (APPLE)
     )
 
 endif ()
-
-
-add_custom_command(
-        TARGET QF-ML
-        POST_BUILD
-
-        COMMAND
-        ${CMAKE_COMMAND}
-        -E
-        make_directory
-        "$<TARGET_FILE_DIR:QF-ML>/models"
-
-        COMMAND
-        ${CMAKE_COMMAND}
-        -E
-        copy_directory
-        "${MODELS_DIR}"
-        "$<TARGET_FILE_DIR:QF-ML>/models"
-
-        COMMAND
-        ${CMAKE_COMMAND}
-        -E
-        copy_if_different
-        "${MODEL_PATH}"
-        "$<TARGET_FILE_DIR:QF-ML>/${MODEL_NAME}"
-)
-
-if (WIN32)
-
-    add_custom_command(
-            TARGET QF-ML
-            POST_BUILD
-
-            COMMAND
-            ${CMAKE_COMMAND}
-            -E
-            copy_if_different
-            "${ONNXRUNTIME_DLL}"
-            "$<TARGET_FILE_DIR:QF-ML>/onnxruntime.dll"
-    )
-
-elseif (APPLE)
-
-    foreach (
-            dylib
-            ${ONNXRUNTIME_DYLIBS}
-    )
-
-        add_custom_command(
-                TARGET QF-ML
-                POST_BUILD
-
-                COMMAND
-                ${CMAKE_COMMAND}
-                -E
-                copy_if_different
-                "${dylib}"
-                "$<TARGET_FILE_DIR:QF-ML>/"
-        )
-
-    endforeach ()
-
-else ()
-
-    foreach (
-            solib
-            ${ONNXRUNTIME_SOLIBS}
-    )
-
-        add_custom_command(
-                TARGET QF-ML
-                POST_BUILD
-
-                COMMAND
-                ${CMAKE_COMMAND}
-                -E
-                copy_if_different
-                "${solib}"
-                "$<TARGET_FILE_DIR:QF-ML>/"
-        )
-
-    endforeach ()
-
-endif ()
-
-
-add_custom_command(
-        TARGET QF-ML
-        POST_BUILD
-
-        COMMAND
-        ${CMAKE_COMMAND}
-        -E
-        copy_if_different
-        "$<TARGET_FILE:Parakeet::Parakeet>"
-        "$<TARGET_FILE_DIR:QF-ML>"
-)
-
-
-add_custom_command(
-        TARGET QF-ML
-        POST_BUILD
-
-        COMMAND
-        ${CMAKE_COMMAND}
-        -E
-        make_directory
-        "$<TARGET_FILE_DIR:QF-ML>/models"
-
-        COMMAND
-        ${CMAKE_COMMAND}
-        -E
-        copy_if_different
-        "${PARAKEET_MODEL_PATH}"
-        "$<TARGET_FILE_DIR:QF-ML>/models/${PARAKEET_MODEL_NAME}"
-)
-
-
-add_dependencies(
-        QF-ML
-        Parakeet::Parakeet
-)

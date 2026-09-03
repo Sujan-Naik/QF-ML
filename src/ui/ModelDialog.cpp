@@ -106,7 +106,7 @@ ModelDialog::ModelDialog(
       , m_inference(inferenceService) {
     setWindowTitle(
         QStringLiteral(
-            "Talos — Local Models"
+            "QF-ML — Local Models"
         )
     );
 
