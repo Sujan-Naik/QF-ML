@@ -1,3 +1,6 @@
 [submodule "external/parakeet.cpp"]
 	path = external/parakeet.cpp
 	url = https://github.com/mudler/parakeet.cpp.git
+[submodule "external/NeMo-Speech.cpp"]
+	path = external/NeMo-Speech.cpp
+	url = https://github.com/NVIDIA/NeMo-Speech.cpp.git

@@ -17,11 +17,20 @@
 
 class LlmClient;
 class TtsManager;
-class WhisperTranscriber;
 
 
 class InferenceService : public QObject {
     Q_OBJECT
+
+public:
+    enum class SttModel {
+        Nemotron35,
+        NemotronEnglish,
+        ParakeetTdt,
+        ParakeetCtc
+    };
+
+    Q_ENUM(SttModel)
 
 public:
     explicit InferenceService(
@@ -34,7 +43,9 @@ public:
         LlamaManager::Backend llamaBackend =
                 LlamaManager::Backend::Vulkan,
         const QString &sttModelPath =
-                QString()
+                QString(),
+        SttModel sttModel =
+                SttModel::Nemotron35
     );
 
     // -------------------------------------------------------------------------
@@ -106,6 +117,22 @@ public:
 
     bool isSttReady() const;
 
+    SttModel sttModel() const;
+
+    QString sttModelName() const;
+
+    QString sttModelPath() const;
+
+    bool setSttModel(
+        SttModel model
+    );
+
+    bool setSttModelName(
+        const QString &model
+    );
+
+    QStringList availableSttModels() const;
+
     // -------------------------------------------------------------------------
     // TTS
     // -------------------------------------------------------------------------
@@ -158,6 +185,14 @@ signals:
 
     void transcriptionFinished(
         const QString &text
+    );
+
+    void transcriptionError(
+        const QString &error
+    );
+
+    void sttModelChanged(
+        const QString &model
     );
 
     void ttsSentenceFinished();
@@ -237,6 +272,20 @@ private:
         const QString &requestedPath
     ) const;
 
+    QString resolveSttModelFilename(
+        SttModel model
+    ) const;
+
+    QString sttModelToString(
+        SttModel model
+    ) const;
+
+    SttModel sttModelFromString(
+        const QString &model
+    ) const;
+
+    int resolveSttGpu() const;
+
 private:
     std::unique_ptr<ModelManager>
     m_modelManager;
@@ -258,10 +307,6 @@ private:
 
     QString m_llmEndpoint;
 
-    /*
-     * This is populated from the actual container model path.
-     * llama.cpp advertises this exact value through /v1/models.
-     */
     QString m_llmModel;
 
     bool m_initialized = false;
@@ -273,4 +318,11 @@ private:
     LlamaManager::Backend
     m_llamaBackend =
             LlamaManager::Backend::Vulkan;
+
+    SttModel
+    m_sttModel =
+            SttModel::Nemotron35;
+
+    QString
+    m_sttModelPath;
 };
