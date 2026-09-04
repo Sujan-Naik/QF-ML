@@ -2,8 +2,7 @@
 
 #include "../include/inference/LlmClient.h"
 #include "../include/voice/TtsManager.h"
-#include "../include/voice/WhisperTranscriber.h"
-#include "../include/voice/ParakeetTranscriber.h"
+#include "../include/voice/NemoTranscriber.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -21,26 +20,27 @@ InferenceService::InferenceService(
     QObject *parent
 )
     : QObject(parent)
-      , m_modelManager(
-          std::make_unique<ModelManager>(
-              this
-          )
-      )
-      , m_llamaManager(
-          std::make_unique<LlamaManager>(
-              this
-          )
-      )
-      , m_ttsManager(
-          std::make_unique<TtsManager>(
-              this
-          )
-      )
-      , m_networkManager(
-          new QNetworkAccessManager(
-              this
-          )
-      ) {
+    , m_modelManager(
+        std::make_unique<ModelManager>(
+            this
+        )
+    )
+    , m_llamaManager(
+        std::make_unique<LlamaManager>(
+            this
+        )
+    )
+    , m_ttsManager(
+        std::make_unique<TtsManager>(
+            this
+        )
+    )
+    , m_networkManager(
+        new QNetworkAccessManager(
+            this
+        )
+    ) {
+
     m_networkManager->setProxy(
         QNetworkProxy::NoProxy
     );
@@ -74,6 +74,7 @@ InferenceService::InferenceService(
         &LlmClient::requestError,
         this,
         [this](const QString &error) {
+
             emit llmError(
                 error
             );
@@ -185,6 +186,7 @@ InferenceService::InferenceService(
         &TtsManager::errorOccurred,
         this,
         [this](const QString &error) {
+
             emit ttsError(
                 error
             );
@@ -214,9 +216,14 @@ InferenceService::InferenceService(
 InferenceService::~InferenceService() = default;
 
 
+// =============================================================================
+// Initialization
+// =============================================================================
+
 bool InferenceService::initialize(
     LlamaManager::Backend llamaBackend,
-    const QString &sttModelPath
+    const QString &sttModelPath,
+    SttModel sttModel
 ) {
     if (m_initialized)
         return true;
@@ -224,10 +231,19 @@ bool InferenceService::initialize(
     m_llamaBackend =
             llamaBackend;
 
+    m_sttModel =
+            sttModel;
+
     qDebug()
             << "[InferenceService] initialize backend="
             << static_cast<int>(
                 m_llamaBackend
+            );
+
+    qDebug()
+            << "[InferenceService] STT model="
+            << sttModelToString(
+                m_sttModel
             );
 
     // -------------------------------------------------------------------------
@@ -240,6 +256,7 @@ bool InferenceService::initialize(
             ).trimmed();
 
     if (!remoteEndpoint.isEmpty()) {
+
         m_llmEndpoint =
                 remoteEndpoint;
 
@@ -251,10 +268,11 @@ bool InferenceService::initialize(
         qDebug()
                 << "[InferenceService] Using remote LLM:"
                 << m_llmEndpoint;
+
     } else {
-        if (
-            !startSelectedLlmModel()
-        ) {
+
+        if (!startSelectedLlmModel()) {
+
             qWarning()
                     << "[InferenceService]"
                     << "No installed local LLM model is selected.";
@@ -271,6 +289,7 @@ bool InferenceService::initialize(
             true
         )
     ) {
+
         emit serviceError(
             QStringLiteral(
                 "Failed to initialize TTS."
@@ -282,11 +301,31 @@ bool InferenceService::initialize(
     // STT
     // -------------------------------------------------------------------------
 
-    const QString backend =
+    const QString environmentModel =
             qEnvironmentVariable(
-                "TALOS_STT_BACKEND",
-                "parakeet"
-            ).trimmed().toLower();
+                "QF_STT_MODEL"
+            ).trimmed();
+
+    if (!environmentModel.isEmpty()) {
+
+        const SttModel selectedFromEnvironment =
+                sttModelFromString(
+                    environmentModel
+                );
+
+        if (
+            selectedFromEnvironment !=
+            SttModel::Nemotron35 ||
+            environmentModel.compare(
+                QStringLiteral("nemotron-3.5"),
+                Qt::CaseInsensitive
+            ) == 0
+        ) {
+
+            m_sttModel =
+                    selectedFromEnvironment;
+        }
+    }
 
     const QString resolvedSttPath =
             resolveSttModelPath(
@@ -294,80 +333,88 @@ bool InferenceService::initialize(
             );
 
     if (resolvedSttPath.isEmpty()) {
+
         emit serviceError(
             QStringLiteral(
-                "No STT model path was found."
+                "No STT model path was found for model '%1'."
+            ).arg(
+                sttModelName()
             )
         );
+
     } else {
-        if (backend == QStringLiteral("parakeet")) {
-            qDebug()
-                    << "[InferenceService] Using Parakeet STT:"
-                    << resolvedSttPath;
 
-            auto transcriber =
-                    std::make_unique<ParakeetTranscriber>(
-                        resolvedSttPath,
-                        this
+        m_sttModelPath =
+                resolvedSttPath;
+
+        const int gpu =
+                resolveSttGpu();
+
+        qDebug()
+                << "[InferenceService] Using NeMo-Speech STT:"
+                << m_sttModelPath
+                << "model="
+                << sttModelName()
+                << "gpu="
+                << gpu;
+
+        const QString language =
+                qEnvironmentVariable(
+                    "QF_STT_LANGUAGE"
+                ).trimmed();
+
+        auto transcriber =
+                std::make_unique<NemoTranscriber>(
+                    resolvedSttPath,
+                    gpu,
+                    language,
+                    this
+                );
+
+        if (transcriber->isLoaded()) {
+
+            connect(
+                transcriber.get(),
+                &NemoTranscriber::transcriptionFinished,
+                this,
+                &InferenceService::transcriptionFinished
+            );
+
+            connect(
+                transcriber.get(),
+                &NemoTranscriber::transcriptionError,
+                this,
+                [this](const QString &error) {
+
+                    emit transcriptionError(
+                        error
                     );
 
-            if (
-                transcriber->isLoaded()
-            ) {
-                m_stt = std::move(
-                    transcriber
-                );
+                    emit serviceError(
+                        error
+                    );
+                }
+            );
 
-                m_sttReady =
-                        true;
-            } else {
-                emit serviceError(
-                    QStringLiteral(
-                        "Failed to load Parakeet STT model: %1"
-                    ).arg(
-                        resolvedSttPath
-                    )
-                );
-            }
-        } else if (
-            backend == QStringLiteral("whisper")
-        ) {
-            qDebug()
-                    << "[InferenceService] Using Whisper STT:"
-                    << resolvedSttPath;
-
-            auto transcriber =
-                    std::make_unique<WhisperTranscriber>(
-                        resolvedSttPath,
-                        this
+            m_stt =
+                    std::move(
+                        transcriber
                     );
 
-            if (
-                transcriber->isLoaded()
-            ) {
-                m_stt =
-                        std::move(
-                            transcriber
-                        );
+            m_sttReady =
+                    true;
 
-                m_sttReady =
-                        true;
-            } else {
-                emit serviceError(
-                    QStringLiteral(
-                        "Failed to load Whisper STT model: %1"
-                    ).arg(
-                        resolvedSttPath
-                    )
-                );
-            }
+            emit sttModelChanged(
+                sttModelName()
+            );
+
         } else {
+
             emit serviceError(
                 QStringLiteral(
-                    "Unknown STT backend '%1'. "
-                    "Use 'whisper' or 'parakeet'."
+                    "Failed to load NeMo-Speech ASR model: %1"
                 ).arg(
-                    backend
+                    resolvedSttPath
                 )
             );
         }
@@ -380,9 +427,9 @@ bool InferenceService::initialize(
 }
 
 
-// -----------------------------------------------------------------------------
+// =============================================================================
 // Models
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 ModelManager *
 InferenceService::models() const {
@@ -391,6 +438,7 @@ InferenceService::models() const {
 
 
 QString InferenceService::modelDirectory() const {
+
     if (!m_modelManager)
         return QString();
 
@@ -417,6 +465,7 @@ void InferenceService::searchLlmModels(
     int limit
 ) {
     if (m_modelManager) {
+
         m_modelManager
                 ->searchRemoteLlmModels(
                     query,
@@ -430,6 +479,7 @@ void InferenceService::inspectLlmModel(
     const QString &repoId
 ) {
     if (m_modelManager) {
+
         m_modelManager
                 ->inspectRemoteModel(
                     repoId
@@ -440,6 +490,7 @@ void InferenceService::inspectLlmModel(
 
 QList<ModelManager::RemoteModel>
 InferenceService::remoteLlmModels() const {
+
     if (!m_modelManager)
         return {};
 
@@ -452,6 +503,7 @@ QList<ModelManager::ModelVariant>
 InferenceService::remoteLlmVariants(
     const QString &repoId
 ) const {
+
     if (!m_modelManager)
         return {};
 
@@ -462,7 +514,9 @@ InferenceService::remoteLlmVariants(
 }
 
 
-QString InferenceService::selectedLlmModelId() const {
+QString
+InferenceService::selectedLlmModelId() const {
+
     if (!m_modelManager)
         return QString();
 
@@ -473,6 +527,7 @@ QString InferenceService::selectedLlmModelId() const {
 
 ModelManager::ModelVariant
 InferenceService::selectedLlmModel() const {
+
     if (!m_modelManager)
         return {};
 
@@ -498,6 +553,7 @@ void InferenceService::downloadLlmModel(
     const ModelManager::ModelVariant &variant
 ) {
     if (m_modelManager) {
+
         m_modelManager
                 ->downloadModel(
                     variant
@@ -507,6 +563,7 @@ void InferenceService::downloadLlmModel(
 
 
 void InferenceService::cancelModelDownload() {
+
     if (m_modelManager)
         m_modelManager
                 ->cancelDownload();
@@ -528,6 +585,7 @@ void InferenceService::onModelSelected(
 
 
 bool InferenceService::startSelectedLlmModel() {
+
     if (
         !m_modelManager ||
         !m_llamaManager
@@ -549,6 +607,7 @@ bool InferenceService::startSelectedLlmModel() {
             variant
         )
     ) {
+
         qWarning()
                 << "[InferenceService] Selected model is not installed:"
                 << variant.id;
@@ -563,6 +622,7 @@ bool InferenceService::startSelectedLlmModel() {
             );
 
     if (modelPath.isEmpty()) {
+
         qWarning()
                 << "[InferenceService] Selected model has no local path:"
                 << variant.id;
@@ -579,6 +639,7 @@ bool InferenceService::startSelectedLlmModel() {
         !modelInfo.isFile() ||
         !modelInfo.isReadable()
     ) {
+
         qWarning()
                 << "[InferenceService] Model path is invalid:"
                 << modelPath;
@@ -586,15 +647,6 @@ bool InferenceService::startSelectedLlmModel() {
         return false;
     }
 
-    /*
-     * llama.cpp's OpenAI-compatible /v1/models response
-     * identifies the loaded model as:
-     *
-     * /models/<filename>
-     *
-     * Keep the request model ID synchronized with that
-     * exact container-side path.
-     */
     m_llmModel =
             QStringLiteral(
                 "/models/%1"
@@ -645,9 +697,9 @@ bool InferenceService::startSelectedLlmModel() {
 }
 
 
-// -----------------------------------------------------------------------------
+// =============================================================================
 // LLM
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 void InferenceService::sendChatRequest(
     const QJsonArray &messages,
@@ -659,6 +711,7 @@ void InferenceService::sendChatRequest(
         return;
 
     if (m_llmEndpoint.isEmpty()) {
+
         emit llmError(
             QStringLiteral(
                 "No LLM endpoint is configured."
@@ -669,6 +722,7 @@ void InferenceService::sendChatRequest(
     }
 
     if (!m_llmReady) {
+
         emit llmError(
             QStringLiteral(
                 "LLM service is not ready."
@@ -711,6 +765,7 @@ void InferenceService::sendChatRequest(
 
 
 void InferenceService::abortChatRequest() {
+
     if (m_llmClient)
         m_llmClient->abortRequest();
 }
@@ -722,6 +777,7 @@ bool InferenceService::isLlmReady() const {
 
 
 void InferenceService::onLlmServerReady() {
+
     m_llmReady =
             true;
 
@@ -738,6 +794,7 @@ void InferenceService::onLlmServerReady() {
 void InferenceService::onLlamaError(
     const QString &error
 ) {
+
     m_llmReady =
             false;
 
@@ -751,13 +808,14 @@ void InferenceService::onLlamaError(
 }
 
 
-// -----------------------------------------------------------------------------
+// =============================================================================
 // STT
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 QString InferenceService::transcribe(
     const std::vector<float> &pcm32f
 ) {
+
     if (
         !m_sttReady ||
         !m_stt ||
@@ -777,9 +835,183 @@ bool InferenceService::isSttReady() const {
 }
 
 
-// -----------------------------------------------------------------------------
+InferenceService::SttModel
+InferenceService::sttModel() const {
+    return m_sttModel;
+}
+
+
+QString InferenceService::sttModelName() const {
+    return sttModelToString(
+        m_sttModel
+    );
+}
+
+
+QString InferenceService::sttModelPath() const {
+    return m_sttModelPath;
+}
+
+
+bool InferenceService::setSttModel(
+    SttModel model
+) {
+    if (m_sttModel == model)
+        return true;
+
+    m_sttModel =
+            model;
+
+    m_sttReady =
+            false;
+
+    m_stt.reset();
+
+    const QString path =
+            resolveSttModelPath(
+                QString()
+            );
+
+    if (path.isEmpty()) {
+
+        emit serviceError(
+            QStringLiteral(
+                "STT model is not installed: %1"
+            ).arg(
+                sttModelName()
+            )
+        );
+
+        return false;
+    }
+
+    const QString language =
+            qEnvironmentVariable(
+                "QF_STT_LANGUAGE"
+            ).trimmed();
+
+    const int gpu =
+            resolveSttGpu();
+
+    auto transcriber =
+            std::make_unique<NemoTranscriber>(
+                path,
+                gpu,
+                language,
+                this
+            );
+
+    if (!transcriber->isLoaded()) {
+
+        emit serviceError(
+            QStringLiteral(
+                "Failed to load STT model: %1"
+            ).arg(
+                path
+            )
+        );
+
+        return false;
+    }
+
+    connect(
+        transcriber.get(),
+        &NemoTranscriber::transcriptionFinished,
+        this,
+        &InferenceService::transcriptionFinished
+    );
+
+    connect(
+        transcriber.get(),
+        &NemoTranscriber::transcriptionError,
+        this,
+        [this](const QString &error) {
+
+            emit transcriptionError(
+                error
+            );
+
+            emit serviceError(
+                error
+            );
+        }
+    );
+
+    m_stt =
+            std::move(
+                transcriber
+            );
+
+    m_sttModelPath =
+            path;
+
+    m_sttReady =
+            true;
+
+    emit sttModelChanged(
+        sttModelName()
+    );
+
+    return true;
+}
+
+
+bool InferenceService::setSttModelName(
+    const QString &model
+) {
+    const QString normalized =
+            model.trimmed().toLower();
+
+    if (normalized.isEmpty())
+        return false;
+
+    const SttModel selected =
+            sttModelFromString(
+                normalized
+            );
+
+    if (
+        normalized !=
+            QStringLiteral("nemotron-3.5") &&
+        normalized !=
+            QStringLiteral("nemotron-en") &&
+        normalized !=
+            QStringLiteral("parakeet-tdt") &&
+        normalized !=
+            QStringLiteral("parakeet-ctc")
+    ) {
+
+        emit serviceError(
+            QStringLiteral(
+                "Unknown STT model '%1'."
+            ).arg(
+                model
+            )
+        );
+
+        return false;
+    }
+
+    return setSttModel(
+        selected
+    );
+}
+
+
+QStringList InferenceService::availableSttModels() const {
+
+    return {
+        QStringLiteral("nemotron-3.5"),
+        QStringLiteral("nemotron-en"),
+        QStringLiteral("parakeet-tdt"),
+        QStringLiteral("parakeet-ctc")
+    };
+}
+
+
+// =============================================================================
 // TTS
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 bool InferenceService::isTtsReady() const {
     return m_ttsReady;
@@ -787,6 +1019,7 @@ bool InferenceService::isTtsReady() const {
 
 
 bool InferenceService::isTtsEnabled() const {
+
     if (!m_ttsManager)
         return false;
 
@@ -798,6 +1031,7 @@ bool InferenceService::isTtsEnabled() const {
 void InferenceService::setTtsEnabled(
     bool enabled
 ) {
+
     if (!m_ttsManager)
         return;
 
@@ -816,6 +1050,7 @@ void InferenceService::speak(
     const QString &text,
     int speakerId
 ) {
+
     if (
         !m_ttsManager ||
         !m_ttsReady ||
@@ -834,6 +1069,7 @@ void InferenceService::speak(
 
 
 void InferenceService::stopSpeech() {
+
     if (m_ttsManager)
         m_ttsManager
                 ->stopAndClear();
@@ -841,6 +1077,7 @@ void InferenceService::stopSpeech() {
 
 
 QString InferenceService::ttsVoice() const {
+
     if (!m_ttsManager)
         return QString();
 
@@ -852,7 +1089,9 @@ QString InferenceService::ttsVoice() const {
 void InferenceService::setTtsVoice(
     const QString &voice
 ) {
+
     if (m_ttsManager) {
+
         m_ttsManager
                 ->setVoice(
                     voice
@@ -862,6 +1101,7 @@ void InferenceService::setTtsVoice(
 
 
 QStringList InferenceService::ttsVoices() const {
+
     if (!m_ttsManager)
         return {};
 
@@ -871,6 +1111,7 @@ QStringList InferenceService::ttsVoices() const {
 
 
 void InferenceService::refreshTtsVoices() {
+
     if (m_ttsManager)
         m_ttsManager
                 ->refreshVoices();
@@ -878,6 +1119,7 @@ void InferenceService::refreshTtsVoices() {
 
 
 void InferenceService::onTtsServerReady() {
+
     m_ttsReady =
             true;
 
@@ -888,121 +1130,253 @@ void InferenceService::onTtsServerReady() {
 }
 
 
+// =============================================================================
+// STT model helpers
+// =============================================================================
+
+QString InferenceService::resolveSttModelFilename(
+    SttModel model
+) const {
+
+    switch (model) {
+
+        case SttModel::Nemotron35:
+            return QStringLiteral(
+                "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
+            );
+
+        case SttModel::NemotronEnglish:
+            return QStringLiteral(
+                "nemotron-speech-streaming-en-0.6b.q8_0.gguf"
+            );
+
+        case SttModel::ParakeetTdt:
+            return QStringLiteral(
+                "parakeet-tdt-0.6b-v3.q8_0.gguf"
+            );
+
+        case SttModel::ParakeetCtc:
+            return QStringLiteral(
+                "parakeet-ctc-1.1b.q8_0.gguf"
+            );
+    }
+
+    return QString();
+}
+
+
+QString InferenceService::sttModelToString(
+    SttModel model
+) const {
+
+    switch (model) {
+
+        case SttModel::Nemotron35:
+            return QStringLiteral(
+                "nemotron-3.5"
+            );
+
+        case SttModel::NemotronEnglish:
+            return QStringLiteral(
+                "nemotron-en"
+            );
+
+        case SttModel::ParakeetTdt:
+            return QStringLiteral(
+                "parakeet-tdt"
+            );
+
+        case SttModel::ParakeetCtc:
+            return QStringLiteral(
+                "parakeet-ctc"
+            );
+    }
+
+    return QStringLiteral(
+        "nemotron-3.5"
+    );
+}
+
+
+InferenceService::SttModel
+InferenceService::sttModelFromString(
+    const QString &model
+) const {
+
+    const QString normalized =
+            model.trimmed().toLower();
+
+    if (
+        normalized ==
+        QStringLiteral("nemotron-en")
+    ) {
+        return SttModel::NemotronEnglish;
+    }
+
+    if (
+        normalized ==
+        QStringLiteral("parakeet-tdt")
+    ) {
+        return SttModel::ParakeetTdt;
+    }
+
+    if (
+        normalized ==
+        QStringLiteral("parakeet-ctc")
+    ) {
+        return SttModel::ParakeetCtc;
+    }
+
+    return SttModel::Nemotron35;
+}
+
+
+int InferenceService::resolveSttGpu() const {
+
+    const QString value =
+            qEnvironmentVariable(
+                "QF_STT_GPU",
+                "0"
+            ).trimmed();
+
+    bool ok = false;
+
+    const int gpu =
+            value.toInt(
+                &ok
+            );
+
+    if (!ok)
+        return 0;
+
+    return gpu;
+}
+
 
 QString InferenceService::resolveSttModelPath(
     const QString &requestedPath
 ) const {
-    const QString backend =
-            qEnvironmentVariable("QF_STT_BACKEND", "parakeet")
-                .trimmed().toLower();
 
     // -------------------------------------------------------------------------
-    // 1. Explicit environment override
+    // 1. Explicit model path argument
     // -------------------------------------------------------------------------
 
-    const QString environmentPath =
-            qEnvironmentVariable("QF_STT_MODEL").trimmed();
+    if (!requestedPath.trimmed().isEmpty()) {
 
-    if (!environmentPath.isEmpty()) {
-        const QFileInfo info(environmentPath);
+        const QFileInfo info(
+            requestedPath
+        );
 
-        if (info.exists() && info.isFile() && info.isReadable()) {
+        if (
+            info.exists() &&
+            info.isFile() &&
+            info.isReadable()
+        ) {
+
             qDebug()
-                    << "[InferenceService] Using QF_STT_MODEL:"
+                    << "[InferenceService] Using requested STT model:"
                     << info.absoluteFilePath();
 
             return info.absoluteFilePath();
         }
 
         qWarning()
-                << "[InferenceService] QF_STT_MODEL is invalid:"
+                << "[InferenceService] Requested STT model is invalid:"
+                << requestedPath;
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. Explicit environment path override
+    // -------------------------------------------------------------------------
+
+    const QString environmentPath =
+            qEnvironmentVariable(
+                "QF_STT_MODEL_PATH"
+            ).trimmed();
+
+    if (!environmentPath.isEmpty()) {
+
+        const QFileInfo info(
+            environmentPath
+        );
+
+        if (
+            info.exists() &&
+            info.isFile() &&
+            info.isReadable()
+        ) {
+
+            qDebug()
+                    << "[InferenceService] Using QF_STT_MODEL_PATH:"
+                    << info.absoluteFilePath();
+
+            return info.absoluteFilePath();
+        }
+
+        qWarning()
+                << "[InferenceService] QF_STT_MODEL_PATH is invalid:"
                 << environmentPath;
     }
 
     // -------------------------------------------------------------------------
-    // 2. Explicit function argument
-    //
-    // Only use it when it matches the selected backend.
-    //
-    // Whisper expects:
-    //   *.bin
-    //
-    // Parakeet expects:
-    //   *.gguf
+    // 3. Shared machine-wide model cache
     // -------------------------------------------------------------------------
 
-    if (!requestedPath.trimmed().isEmpty()) {
-        const QFileInfo info(requestedPath);
+    const QString filename =
+            resolveSttModelFilename(
+                m_sttModel
+            );
 
-        if (info.exists() && info.isFile() && info.isReadable()) {
-            const QString suffix = info.suffix().toLower();
-
-            const bool validForWhisper =
-                    backend == QStringLiteral("whisper") &&
-                    (suffix == QStringLiteral("bin") ||
-                     suffix == QStringLiteral("gguf"));
-
-            const bool validForParakeet =
-                    backend == QStringLiteral("parakeet") &&
-                    suffix == QStringLiteral("gguf");
-
-            if (validForWhisper || validForParakeet) {
-                qDebug()
-                        << "[InferenceService] Using requested STT model:"
-                        << info.absoluteFilePath();
-
-                return info.absoluteFilePath();
-            }
-
-            qWarning()
-                    << "[InferenceService] Ignoring STT model incompatible "
-                    "with backend:"
-                    << backend
-                    << requestedPath;
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // 3. Backend-specific default (shared, namespace-scoped directory)
-    // -------------------------------------------------------------------------
-
-    QString modelPath;
-
-    if (backend == QStringLiteral("parakeet")) {
-        modelPath =
-                QDir(QFPaths::sttModelsDir())
-                    .filePath(QStringLiteral("tdt-1.1b-f16.gguf"));
-    } else if (backend == QStringLiteral("whisper")) {
-        modelPath =
-                QDir(QFPaths::whisperModelsDir())
-                    .filePath(QStringLiteral("ggml-tiny.en.bin"));
-    } else {
-        qWarning()
-                << "[InferenceService] Unknown STT backend:"
-                << backend;
-
+    if (filename.isEmpty())
         return QString();
-    }
 
-    // -------------------------------------------------------------------------
-    // 4. Validate backend default
-    // -------------------------------------------------------------------------
+    const QString modelPath =
+            QDir(
+                QFPaths::sttModelsDir()
+            ).filePath(
+                filename
+            );
 
-    const QFileInfo info(modelPath);
+    const QFileInfo info(
+        modelPath
+    );
 
-    if (info.exists() && info.isFile() && info.isReadable()) {
+    if (
+        info.exists() &&
+        info.isFile() &&
+        info.isReadable()
+    ) {
+
         qDebug()
-                << "[InferenceService] Using default"
-                << backend
-                << "STT model:"
-                << info.absoluteFilePath();
+                << "[InferenceService] Using shared STT model:"
+                << modelPath;
 
         return info.absoluteFilePath();
     }
 
     qWarning()
-            << "[InferenceService] Default STT model not found:"
+            << "[InferenceService] STT model not found:"
             << modelPath;
 
     return QString();
+}
+
+
+// =============================================================================
+// OCR
+// =============================================================================
+
+QString InferenceService::extractText(
+    const QImage &image
+) {
+    Q_UNUSED(image)
+
+    /*
+     * Keep your existing OCR implementation here.
+     *
+     * This placeholder is intentionally left as the final service boundary;
+     * replace it with your current Tesseract code if that implementation lives
+     * elsewhere in the project.
+     */
+    return {};
 }
