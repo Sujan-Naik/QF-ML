@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <QDialog>
@@ -31,6 +32,10 @@ private slots:
     void repositorySelectionChanged();
 
     void variantSelectionChanged();
+
+    void localModelSelectionChanged();
+
+    void refreshLocalModels();
 
     void downloadSelected();
 
@@ -66,9 +71,15 @@ private:
 
     QString selectedVariantId() const;
 
+    QString selectedLocalModelPath() const;
+
+    void populateLocalModels();
+
     void populateRepositories();
 
     void populateVariants();
+
+    void updateLocalModelInfo();
 
     void updateVariantInfo();
 
@@ -96,14 +107,23 @@ private:
     QPushButton *
             m_directoryButton = nullptr;
 
+    QPushButton *
+            m_refreshLocalButton = nullptr;
+
     QLabel *
             m_directoryLabel = nullptr;
+
+    QListWidget *
+            m_localModelList = nullptr;
 
     QListWidget *
             m_repositoryList = nullptr;
 
     QListWidget *
             m_variantList = nullptr;
+
+    QLabel *
+            m_localModelInfoLabel = nullptr;
 
     QLabel *
             m_modelInfoLabel = nullptr;

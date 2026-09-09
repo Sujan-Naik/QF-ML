@@ -4,7 +4,7 @@
 #include <QObject>
 
 #include <memory>
-#include <qt6/QtCore/qtmetamacros.h>
+#include <QtCore/qtmetamacros.h>
 
 class LlamaManager;
 class TtsManager;

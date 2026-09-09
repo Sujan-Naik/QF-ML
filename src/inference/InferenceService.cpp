@@ -41,6 +41,10 @@ InferenceService::InferenceService(
         )
     ) {
 
+    m_modelManager->setStorageDirectory(
+        QFPaths::modelsRoot()
+    );
+
     m_networkManager->setProxy(
         QNetworkProxy::NoProxy
     );

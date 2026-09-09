@@ -8,11 +8,12 @@
 #include <QJsonObject>
 #include <QNetworkProxy>
 #include <QNetworkRequest>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QUrl>
 #include <QUrlQuery>
-
 
 ModelManager::ModelManager(
     QObject *parent
@@ -56,9 +57,25 @@ ModelManager::ModelManager(
         m_storageDirectory
     );
 
+    m_downloadProgressTimer =
+            new QTimer(
+                this
+            );
+
+    m_downloadProgressTimer
+            ->setInterval(
+                250
+            );
+
+    connect(
+        m_downloadProgressTimer,
+        &QTimer::timeout,
+        this,
+        &ModelManager::updateDownloadProgress
+    );
+
     loadSelectedModel();
 }
-
 
 ModelManager::~ModelManager() {
     cancelDownload();
@@ -76,11 +93,9 @@ ModelManager::~ModelManager() {
     m_variantSizeReplies.clear();
 }
 
-
 QString ModelManager::storageDirectory() const {
     return m_storageDirectory;
 }
-
 
 bool ModelManager::setStorageDirectory(
     const QString &directory
@@ -155,7 +170,6 @@ bool ModelManager::setStorageDirectory(
     return true;
 }
 
-
 void ModelManager::searchRemoteLlmModels(
     const QString &query,
     int limit
@@ -195,11 +209,6 @@ void ModelManager::searchRemoteLlmModels(
         );
     }
 
-    /*
-     * GGUF is an actual Hub filter. This means we're not
-     * asking Hugging Face for every kind of model and then
-     * trying to guess which ones are usable by llama.cpp.
-     */
     queryParams.addQueryItem(
         QStringLiteral(
             "filter"
@@ -247,7 +256,7 @@ void ModelManager::searchRemoteLlmModels(
     request.setHeader(
         QNetworkRequest::UserAgentHeader,
         QStringLiteral(
-            "TalosApp/1.0"
+            "QF-ML/1.0"
         )
     );
 
@@ -268,7 +277,6 @@ void ModelManager::searchRemoteLlmModels(
     );
 }
 
-
 void ModelManager::inspectRemoteModel(
     const QString &repoId
 ) {
@@ -287,16 +295,6 @@ void ModelManager::inspectRemoteModel(
         m_inspectReply = nullptr;
     }
 
-    /*
-     * IMPORTANT:
-     *
-     * Do NOT use blobs=true here.
-     *
-     * We only need the repository's file list to discover
-     * GGUF variants. Hugging Face documents that file metadata
-     * is a separate, more expensive operation. We resolve
-     * file sizes independently afterwards.
-     */
     QUrl url(
         QStringLiteral(
             "https://huggingface.co/api/models/%1"
@@ -327,7 +325,7 @@ void ModelManager::inspectRemoteModel(
     request.setHeader(
         QNetworkRequest::UserAgentHeader,
         QStringLiteral(
-            "TalosApp/1.0"
+            "QF-ML/1.0"
         )
     );
 
@@ -351,12 +349,10 @@ void ModelManager::inspectRemoteModel(
     );
 }
 
-
 QList<ModelManager::RemoteModel>
 ModelManager::remoteModels() const {
     return m_remoteModels;
 }
-
 
 QList<ModelManager::ModelVariant>
 ModelManager::remoteVariants(
@@ -366,7 +362,6 @@ ModelManager::remoteVariants(
         repoId
     );
 }
-
 
 bool ModelManager::parseRemoteModel(
     const QJsonObject &object,
@@ -463,7 +458,6 @@ bool ModelManager::parseRemoteModel(
     return true;
 }
 
-
 QList<ModelManager::ModelVariant>
 ModelManager::parseVariants(
     const QString &repoId,
@@ -511,10 +505,6 @@ ModelManager::parseVariants(
             continue;
         }
 
-        /*
-         * Do not treat multimodal projector files as LLM
-         * quantization variants.
-         */
         if (
             fileName.contains(
                 QStringLiteral(
@@ -601,9 +591,6 @@ ModelManager::parseVariants(
                     files
                 );
 
-        /*
-         * Size is populated asynchronously with HEAD requests.
-         */
         variant.sizeBytes =
                 0;
 
@@ -627,7 +614,6 @@ ModelManager::parseVariants(
 
     return variants;
 }
-
 
 void ModelManager::onSearchFinished() {
     if (!m_searchReply)
@@ -699,7 +685,6 @@ void ModelManager::onSearchFinished() {
     emit remoteModelsChanged();
 }
 
-
 void ModelManager::onInspectFinished() {
     if (!m_inspectReply)
         return;
@@ -723,9 +708,6 @@ void ModelManager::onInspectFinished() {
             QNetworkReply::NoError;
 
     if (!success) {
-        const QString error =
-                reply->errorString();
-
         reply->deleteLater();
 
         m_remoteVariants.remove(
@@ -766,12 +748,6 @@ void ModelManager::onInspectFinished() {
                 document.object()
             );
 
-    /*
-     * SHOW THE VARIANTS IMMEDIATELY.
-     *
-     * Size/VRAM enrichment happens separately and cannot
-     * prevent the user from seeing the available GGUFs.
-     */
     m_remoteVariants.insert(
         repoId,
         variants
@@ -785,7 +761,6 @@ void ModelManager::onInspectFinished() {
         repoId
     );
 }
-
 
 void ModelManager::resolveVariantSizes(
     const QString &repoId
@@ -817,7 +792,7 @@ void ModelManager::resolveVariantSizes(
             request.setHeader(
                 QNetworkRequest::UserAgentHeader,
                 QStringLiteral(
-                    "TalosApp/1.0"
+                    "QF-ML/1.0"
                 )
             );
 
@@ -847,7 +822,6 @@ void ModelManager::resolveVariantSizes(
         }
     }
 }
-
 
 void ModelManager::onVariantFileHeadFinished() {
     QNetworkReply *reply =
@@ -917,7 +891,6 @@ void ModelManager::onVariantFileHeadFinished() {
     );
 }
 
-
 void ModelManager::updateVariantSize(
     const QString &repoId,
     const QString &fileName,
@@ -968,7 +941,6 @@ void ModelManager::updateVariantSize(
     );
 }
 
-
 bool ModelManager::isVariantInstalled(
     const ModelVariant &variant
 ) const {
@@ -1011,7 +983,6 @@ bool ModelManager::isVariantInstalled(
     return true;
 }
 
-
 QString ModelManager::variantDirectory(
     const ModelVariant &variant
 ) const {
@@ -1044,7 +1015,6 @@ QString ModelManager::variantDirectory(
     );
 }
 
-
 QString ModelManager::variantEntryPath(
     const ModelVariant &variant
 ) const {
@@ -1054,10 +1024,6 @@ QString ModelManager::variantEntryPath(
         return QString();
     }
 
-    /*
-     * llama.cpp starts from the first GGUF file. For a
-     * sharded model this is expected to be the first shard.
-     */
     return QDir(
         variantDirectory(
             variant
@@ -1067,17 +1033,14 @@ QString ModelManager::variantEntryPath(
     );
 }
 
-
 QString ModelManager::selectedModelId() const {
     return m_selectedModelId;
 }
-
 
 ModelManager::ModelVariant
 ModelManager::selectedModel() const {
     return m_selectedModel;
 }
-
 
 bool ModelManager::selectModel(
     const ModelVariant &variant
@@ -1108,25 +1071,71 @@ bool ModelManager::selectModel(
     return true;
 }
 
-
 bool ModelManager::isDownloading() const {
-    return m_downloadReply != nullptr;
+    return m_downloadProcess != nullptr;
 }
-
 
 QString ModelManager::downloadingModelId() const {
     return m_downloadingVariant.id;
 }
 
+QString ModelManager::hfExecutable() const {
+    QString executable =
+            QStandardPaths::findExecutable(
+                QStringLiteral(
+                    "hf"
+                )
+            );
+
+    if (!executable.isEmpty())
+        return executable;
+
+    const QString localBin =
+            QDir(
+                QDir::homePath()
+            ).filePath(
+                QStringLiteral(
+                    ".local/bin/hf"
+                )
+            );
+
+    QFileInfo localBinInfo(
+        localBin
+    );
+
+    if (
+        localBinInfo.exists() &&
+        localBinInfo.isFile() &&
+        localBinInfo.isExecutable()
+    ) {
+        return localBinInfo.absoluteFilePath();
+    }
+
+    return QString();
+}
 
 void ModelManager::downloadModel(
     const ModelVariant &variant
 ) {
     if (
-        m_downloadReply ||
+        m_downloadProcess ||
         variant.id.isEmpty() ||
         variant.fileNames.isEmpty()
     ) {
+        return;
+    }
+
+    const QString hf =
+            hfExecutable();
+
+    if (hf.isEmpty()) {
+        emit downloadError(
+            variant.id,
+            QStringLiteral(
+                "The Hugging Face CLI 'hf' was not found."
+            )
+        );
+
         return;
     }
 
@@ -1156,8 +1165,8 @@ void ModelManager::downloadModel(
     m_downloadFiles =
             variant.fileNames;
 
-    m_downloadFileIndex =
-            0;
+    m_downloadDirectory =
+            directory;
 
     m_downloadCompletedBytes =
             0;
@@ -1165,165 +1174,203 @@ void ModelManager::downloadModel(
     m_downloadTotalBytes =
             variant.sizeBytes;
 
-    m_downloadDirectory =
-            directory;
-
     m_downloadCancelled =
             false;
+
+    m_downloadProcess =
+            new QProcess(
+                this
+            );
+
+    m_downloadProcess
+            ->setProgram(
+                hf
+            );
+
+    QStringList arguments;
+
+    arguments
+            << QStringLiteral(
+                "download"
+            )
+            << variant.repoId;
+
+    for (
+        const QString &fileName:
+        variant.fileNames
+    ) {
+        arguments
+                << fileName;
+    }
+
+    arguments
+            << QStringLiteral(
+                "--local-dir"
+            )
+            << directory
+            << QStringLiteral(
+                "--max-workers"
+            )
+            << QStringLiteral(
+                "8"
+            );
+
+    m_downloadProcess
+            ->setArguments(
+                arguments
+            );
+
+    QProcessEnvironment environment =
+            QProcessEnvironment::systemEnvironment();
+
+    environment.insert(
+        QStringLiteral(
+            "HF_HUB_DOWNLOAD_TIMEOUT"
+        ),
+        QStringLiteral(
+            "1800"
+        )
+    );
+
+    environment.remove(
+        QStringLiteral(
+            "HF_HUB_DISABLE_XET"
+        )
+    );
+
+    environment.remove(
+        QStringLiteral(
+            "HF_HUB_ENABLE_HF_TRANSFER"
+        )
+    );
+
+    m_downloadProcess
+            ->setProcessEnvironment(
+                environment
+            );
+
+    connect(
+        m_downloadProcess,
+        qOverload<int, QProcess::ExitStatus>(
+            &QProcess::finished
+        ),
+        this,
+        &ModelManager::onDownloadProcessFinished
+    );
+
+    connect(
+        m_downloadProcess,
+        &QProcess::errorOccurred,
+        this,
+        [this](
+            QProcess::ProcessError error
+        ) {
+            if (
+                !m_downloadProcess
+            ) {
+                return;
+            }
+
+            if (
+                error ==
+                QProcess::FailedToStart
+            ) {
+                const QString modelId =
+                        m_downloadingVariant.id;
+
+                clearDownloadState();
+
+                emit downloadError(
+                    modelId,
+                    QStringLiteral(
+                        "The Hugging Face CLI could not be started."
+                    )
+                );
+            }
+        }
+    );
 
     emit downloadStarted(
         variant.id
     );
 
-    startNextDownloadFile();
+    m_downloadProcess
+            ->start();
+
+    if (
+        m_downloadProgressTimer &&
+        !m_downloadProgressTimer
+        ->isActive()
+    ) {
+        m_downloadProgressTimer
+                ->start();
+    }
 }
 
+qint64 ModelManager::localDownloadBytes() const {
+    qint64 total =
+            0;
 
-void ModelManager::startNextDownloadFile() {
-    if (
-        m_downloadCancelled
+    const QDir directory(
+        m_downloadDirectory
+    );
+
+    for (
+        const QString &fileName:
+        m_downloadFiles
     ) {
-        clearDownloadState();
-        return;
-    }
-
-    if (
-        m_downloadFileIndex >=
-        m_downloadFiles.size()
-    ) {
-        const ModelVariant completed =
-                m_downloadingVariant;
-
-        clearDownloadState();
-
-        selectModel(
-            completed
-        );
-
-        emit downloadFinished(
-            completed.id
-        );
-
-        return;
-    }
-
-    closeDownloadFile();
-
-    const QString fileName =
-            m_downloadFiles[
-                m_downloadFileIndex
-            ];
-
-    const QString finalPath =
-            QDir(
-                m_downloadDirectory
-            ).filePath(
-                fileName
-            );
-
-    m_downloadPartPath =
-            finalPath +
-            QStringLiteral(
-                ".part"
-            );
-
-    m_downloadFile =
-            new QFile(
-                m_downloadPartPath,
-                this
-            );
-
-    if (
-        !m_downloadFile->open(
-            QIODevice::WriteOnly |
-            QIODevice::Truncate
-        )
-    ) {
-        const QString id =
-                m_downloadingVariant.id;
-
-        clearDownloadState();
-
-        emit downloadError(
-            id,
-            QStringLiteral(
-                "Could not create download file."
-            )
-        );
-
-        return;
-    }
-
-    QNetworkRequest request(
-        QUrl(
-            resolveUrl(
-                m_downloadingVariant.repoId,
+        const QFileInfo info(
+            directory.filePath(
                 fileName
             )
-        )
-    );
+        );
 
-    request.setHeader(
-        QNetworkRequest::UserAgentHeader,
-        QStringLiteral(
-            "TalosApp/1.0"
-        )
-    );
-
-    /*
-     * Large model downloads should not be subject to a short
-     * transfer timeout. The model download is user initiated.
-     */
-    request.setTransferTimeout(
-        0
-    );
-
-    m_downloadReply =
-            m_networkManager->get(
-                request
-            );
-
-    connect(
-        m_downloadReply,
-        &QNetworkReply::readyRead,
-        this,
-        &ModelManager::onDownloadReadyRead
-    );
-
-    connect(
-        m_downloadReply,
-        &QNetworkReply::downloadProgress,
-        this,
-        [this](
-    qint64 received,
-    qint64 total
-) {
-            const qint64 effectiveTotal =
-                    m_downloadTotalBytes > 0
-                        ? m_downloadTotalBytes
-                        : total;
-
-            emit downloadProgress(
-                m_downloadingVariant.id,
-                m_downloadCompletedBytes +
-                received,
-                effectiveTotal
-            );
+        if (
+            info.exists() &&
+            info.isFile()
+        ) {
+            total +=
+                    info.size();
         }
-    );
+    }
 
-    connect(
-        m_downloadReply,
-        &QNetworkReply::finished,
-        this,
-        &ModelManager::onDownloadFinished
-    );
+    return total;
 }
 
+void ModelManager::updateDownloadProgress() {
+    if (
+        !m_downloadProcess ||
+        m_downloadDirectory.isEmpty()
+    ) {
+        return;
+    }
+
+    const qint64 received =
+            localDownloadBytes();
+
+    m_downloadCompletedBytes =
+            received;
+
+    qint64 total =
+            m_downloadTotalBytes;
+
+    if (
+        total <= 0
+    ) {
+        total =
+                received;
+    }
+
+    emit downloadProgress(
+        m_downloadingVariant.id,
+        received,
+        total
+    );
+}
 
 void ModelManager::cancelDownload() {
     if (
-        !m_downloadReply
+        !m_downloadProcess
     ) {
         m_downloadCancelled =
                 true;
@@ -1334,91 +1381,103 @@ void ModelManager::cancelDownload() {
     m_downloadCancelled =
             true;
 
-    m_downloadReply->abort();
+    m_downloadProcess
+            ->terminate();
+
+    if (
+        !m_downloadProcess
+        ->waitForFinished(
+            2000
+        )
+    ) {
+        m_downloadProcess
+                ->kill();
+    }
 }
 
-
-void ModelManager::onDownloadReadyRead() {
+void ModelManager::onDownloadProcessFinished(
+    int exitCode,
+    QProcess::ExitStatus exitStatus
+) {
     if (
-        !m_downloadReply ||
-        !m_downloadFile
+        !m_downloadProcess
     ) {
         return;
     }
 
-    const QByteArray bytes =
-            m_downloadReply->readAll();
+    QProcess *process =
+            m_downloadProcess;
 
-    if (
-        !bytes.isEmpty()
-    ) {
-        m_downloadFile->write(
-            bytes
-        );
-    }
-}
-
-
-void ModelManager::onDownloadFinished() {
-    if (
-        !m_downloadReply
-    ) {
-        return;
-    }
-
-    QNetworkReply *reply =
-            m_downloadReply;
-
-    m_downloadReply =
+    m_downloadProcess =
             nullptr;
+
+    if (
+        m_downloadProgressTimer
+    ) {
+        m_downloadProgressTimer
+                ->stop();
+    }
 
     const QString modelId =
             m_downloadingVariant.id;
 
+    const ModelVariant completed =
+            m_downloadingVariant;
+
+    const QString standardError =
+            QString::fromUtf8(
+                process
+                ->readAllStandardError()
+            ).trimmed();
+
+    const QString standardOutput =
+            QString::fromUtf8(
+                process
+                ->readAllStandardOutput()
+            ).trimmed();
+
+    process->deleteLater();
+
     if (
-        m_downloadFile
+        m_downloadCancelled
     ) {
-        const QByteArray remaining =
-                reply->readAll();
+        clearDownloadState();
 
-        if (
-            !remaining.isEmpty()
-        ) {
-            m_downloadFile->write(
-                remaining
-            );
-        }
+        emit downloadError(
+            modelId,
+            QStringLiteral(
+                "Download cancelled."
+            )
+        );
 
-        m_downloadFile->flush();
-        m_downloadFile->close();
+        return;
     }
 
-    const bool success =
-            !m_downloadCancelled &&
-            reply->error() ==
-            QNetworkReply::NoError;
-
     if (
-        !success
+        exitStatus !=
+        QProcess::NormalExit ||
+        exitCode != 0
     ) {
-        const QString error =
-                m_downloadCancelled
-                    ? QStringLiteral(
-                        "Download cancelled."
-                    )
-                    : (
-                        reply->errorString().isEmpty()
-                            ? QStringLiteral(
-                                "Download failed."
-                            )
-                            : reply->errorString()
+        QString error =
+                standardError;
+
+        if (
+            error.isEmpty()
+        ) {
+            error =
+                    standardOutput;
+        }
+
+        if (
+            error.isEmpty()
+        ) {
+            error =
+                    QStringLiteral(
+                        "Hugging Face download failed with exit code %1."
+                    ).arg(
+                        exitCode
                     );
-
-        reply->deleteLater();
-
-        QFile::remove(
-            m_downloadPartPath
-        );
+        }
 
         clearDownloadState();
 
@@ -1430,35 +1489,9 @@ void ModelManager::onDownloadFinished() {
         return;
     }
 
-    reply->deleteLater();
-
     if (
-        m_downloadFile
-    ) {
-        m_downloadFile->flush();
-        m_downloadFile->close();
-    }
-
-    const QString fileName =
-            m_downloadFiles[
-                m_downloadFileIndex
-            ];
-
-    const QString finalPath =
-            QDir(
-                m_downloadDirectory
-            ).filePath(
-                fileName
-            );
-
-    QFile::remove(
-        finalPath
-    );
-
-    if (
-        !QFile::rename(
-            m_downloadPartPath,
-            finalPath
+        !isVariantInstalled(
+            completed
         )
     ) {
         clearDownloadState();
@@ -1466,25 +1499,31 @@ void ModelManager::onDownloadFinished() {
         emit downloadError(
             modelId,
             QStringLiteral(
-                "Downloaded file could not be installed."
+                "Hugging Face reported success, but the expected model files were not installed."
             )
         );
 
         return;
     }
 
-    QFileInfo installedFile(
-        finalPath
+    emit downloadProgress(
+        modelId,
+        completed.sizeBytes > 0
+            ? completed.sizeBytes
+            : localDownloadBytes(),
+        completed.sizeBytes
     );
 
-    m_downloadCompletedBytes +=
-            installedFile.size();
+    clearDownloadState();
 
-    ++m_downloadFileIndex;
+    selectModel(
+        completed
+    );
 
-    startNextDownloadFile();
+    emit downloadFinished(
+        completed.id
+    );
 }
-
 
 void ModelManager::loadSelectedModel() {
     QSettings settings;
@@ -1580,7 +1619,6 @@ void ModelManager::loadSelectedModel() {
             variant.id;
 }
 
-
 void ModelManager::saveSelectedModel(
     const ModelVariant &variant
 ) {
@@ -1636,7 +1674,6 @@ void ModelManager::saveSelectedModel(
     );
 }
 
-
 double ModelManager::estimateVramGb(
     qint64 sizeBytes
 ) {
@@ -1652,18 +1689,11 @@ double ModelManager::estimateVramGb(
             ) /
             1000000000.0;
 
-    /*
-     * This is deliberately an estimate.
-     *
-     * Actual VRAM depends on context, KV cache, batch size,
-     * backend and llama.cpp runtime configuration.
-     */
     return qMax(
         2.0,
         modelGb * 1.15 + 1.0
     );
 }
-
 
 QString ModelManager::detectQuantization(
     const QString &fileName
@@ -1695,7 +1725,6 @@ QString ModelManager::detectQuantization(
     ).toUpper();
 }
 
-
 QString ModelManager::variantId(
     const QString &repoId,
     const QStringList &fileNames
@@ -1716,7 +1745,6 @@ QString ModelManager::variantId(
         ).toHex()
     );
 }
-
 
 QString ModelManager::resolveUrl(
     const QString &repoId,
@@ -1758,56 +1786,20 @@ QString ModelManager::resolveUrl(
     );
 }
 
-
 void ModelManager::clearDownloadState() {
-    closeDownloadFile();
-
-    if (
-        !m_downloadPartPath.isEmpty()
-    ) {
-        QFile::remove(
-            m_downloadPartPath
-        );
-    }
-
     m_downloadingVariant =
             ModelVariant();
 
     m_downloadFiles.clear();
 
-    m_downloadFileIndex =
+    m_downloadDirectory.clear();
+
+    m_downloadTotalBytes =
             0;
 
     m_downloadCompletedBytes =
             0;
 
-    m_downloadTotalBytes =
-            0;
-
-    m_downloadDirectory.clear();
-
-    m_downloadPartPath.clear();
-
     m_downloadCancelled =
             false;
-}
-
-
-void ModelManager::closeDownloadFile() {
-    if (
-        !m_downloadFile
-    ) {
-        return;
-    }
-
-    if (
-        m_downloadFile->isOpen()
-    ) {
-        m_downloadFile->close();
-    }
-
-    m_downloadFile->deleteLater();
-
-    m_downloadFile =
-            nullptr;
 }

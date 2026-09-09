@@ -1,54 +1,41 @@
 #pragma once
 
 #include <QObject>
-#include <QFile>
+#include <QHash>
 #include <QList>
+#include <QPair>
+#include <QString>
+#include <QStringList>
+
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
-#include <QUrl>
-#include <QHash>
+
+#include <QProcess>
+#include <QTimer>
+
+class QFile;
 
 class ModelManager : public QObject {
     Q_OBJECT
 
 public:
-    enum class ModelType {
-        Llm,
-        Stt,
-        Tts,
-        Ocr
-    };
-
-    Q_ENUM(ModelType)
-
     struct RemoteModel {
         QString id;
         QString author;
         QString displayName;
-
         qint64 downloads = 0;
         qint64 likes = 0;
-
         QString lastModified;
-
         QStringList tags;
     };
 
     struct ModelVariant {
         QString id;
-
         QString repoId;
         QString displayName;
-
         QString quantization;
-
         QStringList fileNames;
-
         qint64 sizeBytes = 0;
-        qint64 downloads = 0;
-
-        QString lastModified;
-
         double estimatedVramGb = 0.0;
     };
 
@@ -58,19 +45,11 @@ public:
 
     ~ModelManager() override;
 
-    // -------------------------------------------------------------------------
-    // Local storage
-    // -------------------------------------------------------------------------
-
     QString storageDirectory() const;
 
     bool setStorageDirectory(
         const QString &directory
     );
-
-    // -------------------------------------------------------------------------
-    // Hugging Face search
-    // -------------------------------------------------------------------------
 
     void searchRemoteLlmModels(
         const QString &query,
@@ -81,21 +60,15 @@ public:
         const QString &repoId
     );
 
-    QList<RemoteModel> remoteModels() const;
+    QList<RemoteModel>
+    remoteModels() const;
 
-    QList<ModelVariant> remoteVariants(
+    QList<ModelVariant>
+    remoteVariants(
         const QString &repoId
     ) const;
 
-    // -------------------------------------------------------------------------
-    // Local model state
-    // -------------------------------------------------------------------------
-
     bool isVariantInstalled(
-        const ModelVariant &variant
-    ) const;
-
-    QString variantDirectory(
         const ModelVariant &variant
     ) const;
 
@@ -111,25 +84,25 @@ public:
         const ModelVariant &variant
     );
 
-    // -------------------------------------------------------------------------
-    // Download
-    // -------------------------------------------------------------------------
-
-    bool isDownloading() const;
-
-    QString downloadingModelId() const;
-
     void downloadModel(
         const ModelVariant &variant
     );
 
     void cancelDownload();
 
+    bool isDownloading() const;
+
+    QString downloadingModelId() const;
+
 signals:
     void remoteModelsChanged();
 
     void remoteVariantsChanged(
         const QString &repoId
+    );
+
+    void storageDirectoryChanged(
+        const QString &directory
     );
 
     void selectedModelChanged(
@@ -155,10 +128,6 @@ signals:
         const QString &error
     );
 
-    void storageDirectoryChanged(
-        const QString &directory
-    );
-
 private slots:
     void onSearchFinished();
 
@@ -166,11 +135,38 @@ private slots:
 
     void onVariantFileHeadFinished();
 
-    void onDownloadReadyRead();
+    void onDownloadProcessFinished(
+        int exitCode,
+        QProcess::ExitStatus exitStatus
+    );
 
-    void onDownloadFinished();
+    void updateDownloadProgress();
 
 private:
+    bool parseRemoteModel(
+        const QJsonObject &object,
+        RemoteModel &model
+    ) const;
+
+    QList<ModelVariant> parseVariants(
+        const QString &repoId,
+        const QJsonObject &object
+    ) const;
+
+    void resolveVariantSizes(
+        const QString &repoId
+    );
+
+    void updateVariantSize(
+        const QString &repoId,
+        const QString &fileName,
+        qint64 size
+    );
+
+    QString variantDirectory(
+        const ModelVariant &variant
+    ) const;
+
     static double estimateVramGb(
         qint64 sizeBytes
     );
@@ -189,16 +185,6 @@ private:
         const QString &fileName
     );
 
-    bool parseRemoteModel(
-        const QJsonObject &object,
-        RemoteModel &model
-    ) const;
-
-    QList<ModelVariant> parseVariants(
-        const QString &repoId,
-        const QJsonObject &object
-    ) const;
-
     void loadSelectedModel();
 
     void saveSelectedModel(
@@ -207,69 +193,66 @@ private:
 
     void clearDownloadState();
 
-    void closeDownloadFile();
+    QString hfExecutable() const;
 
-    void startNextDownloadFile();
-
-    void resolveVariantSizes(
-        const QString &repoId
-    );
-
-    void updateVariantSize(
-        const QString &repoId,
-        const QString &fileName,
-        qint64 size
-    );
+    qint64 localDownloadBytes() const;
 
 private:
-    QNetworkAccessManager *m_networkManager =
-            nullptr;
+    QNetworkAccessManager *
+            m_networkManager = nullptr;
 
-    QNetworkReply *m_searchReply =
-            nullptr;
+    QNetworkReply *
+            m_searchReply = nullptr;
 
-    QNetworkReply *m_inspectReply =
-            nullptr;
+    QNetworkReply *
+            m_inspectReply = nullptr;
 
     QHash<
         QNetworkReply *,
         QPair<QString, QString>
     > m_variantSizeReplies;
 
-    QNetworkReply *m_downloadReply =
-            nullptr;
+    QString
+            m_storageDirectory;
 
-    QFile *m_downloadFile =
-            nullptr;
-
-    QString m_storageDirectory;
-
-    QList<RemoteModel> m_remoteModels;
+    QList<RemoteModel>
+            m_remoteModels;
 
     QHash<
         QString,
         QList<ModelVariant>
     > m_remoteVariants;
 
-    QString m_inspectingRepoId;
+    QString
+            m_inspectingRepoId;
 
-    QString m_selectedModelId;
+    QString
+            m_selectedModelId;
 
-    ModelVariant m_selectedModel;
+    ModelVariant
+            m_selectedModel;
 
-    ModelVariant m_downloadingVariant;
+    QProcess *
+            m_downloadProcess = nullptr;
 
-    QStringList m_downloadFiles;
+    QTimer *
+            m_downloadProgressTimer = nullptr;
 
-    int m_downloadFileIndex = 0;
+    ModelVariant
+            m_downloadingVariant;
 
-    qint64 m_downloadCompletedBytes = 0;
+    QStringList
+            m_downloadFiles;
 
-    qint64 m_downloadTotalBytes = 0;
+    QString
+            m_downloadDirectory;
 
-    QString m_downloadDirectory;
+    qint64
+            m_downloadTotalBytes = 0;
 
-    QString m_downloadPartPath;
+    qint64
+            m_downloadCompletedBytes = 0;
 
-    bool m_downloadCancelled = false;
+    bool
+            m_downloadCancelled = false;
 };
