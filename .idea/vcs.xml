@@ -2,17 +2,8 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/ggml" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/llama.cpp" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/proto/riva-common" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/third_party/cpp-httplib" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/third_party/cppjieba" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/third_party/cppjieba/deps/limonp" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/third_party/flashlight-text" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/third_party/kenlm" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/NeMo-Speech.cpp/third_party/open_jtalk" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/parakeet.cpp" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/parakeet.cpp/third_party/ggml" vcs="Git" />
+  </component>
+  <component name="VcsProjectSettings">
+    <option name="detectVcsMappingsAutomatically" value="false" />
   </component>
 </project>

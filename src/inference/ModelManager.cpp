@@ -1,6 +1,8 @@
 #include "inference/ModelManager.h"
+#include "app/QfPaths.h"
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -16,6 +18,8 @@ ModelManager::ModelManager(QObject *parent)
     , m_networkManager(new QNetworkAccessManager(this))
     , m_downloadProgressTimer(new QTimer(this)) {
 
+    m_storageDirectory = QFPaths::llmModelsDir();
+
     connect(m_downloadProgressTimer, &QTimer::timeout,
             this, &ModelManager::updateDownloadProgress);
 }
@@ -23,19 +27,21 @@ ModelManager::ModelManager(QObject *parent)
 ModelManager::~ModelManager() = default;
 
 QString ModelManager::storageDirectory() const {
-    return m_storageDirectory;
+    return m_storageDirectory.isEmpty() ? QFPaths::llmModelsDir() : m_storageDirectory;
 }
 
 bool ModelManager::setStorageDirectory(const QString &directory) {
-    if (m_storageDirectory == directory)
+    const QString targetDir = directory.isEmpty() ? QFPaths::llmModelsDir() : directory;
+
+    if (m_storageDirectory == targetDir)
         return true;
 
-    QDir dir(directory);
+    QDir dir(targetDir);
     if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
         return false;
     }
 
-    m_storageDirectory = directory;
+    m_storageDirectory = targetDir;
     loadSelectedModel();
     emit storageDirectoryChanged(m_storageDirectory);
     return true;
@@ -87,9 +93,6 @@ QList<ModelManager::ModelVariant> ModelManager::remoteVariants(const QString &re
 }
 
 bool ModelManager::isVariantInstalled(const ModelVariant &variant) const {
-    if (m_storageDirectory.isEmpty())
-        return false;
-
     const QString path = variantEntryPath(variant);
     if (path.isEmpty())
         return false;
@@ -99,7 +102,7 @@ bool ModelManager::isVariantInstalled(const ModelVariant &variant) const {
 }
 
 QString ModelManager::variantEntryPath(const ModelVariant &variant) const {
-    if (m_storageDirectory.isEmpty() || variant.fileNames.isEmpty())
+    if (variant.fileNames.isEmpty())
         return QString();
 
     const QString dirPath = variantDirectory(variant);
@@ -149,7 +152,17 @@ void ModelManager::downloadModel(const ModelVariant &variant) {
     m_downloadingVariant = variant;
     m_downloadFiles = variant.fileNames;
     m_downloadDirectory = variantDirectory(variant);
+
     m_downloadTotalBytes = variant.sizeBytes;
+    if (m_downloadTotalBytes <= 0 && m_remoteVariants.contains(variant.repoId)) {
+        for (const auto &v : m_remoteVariants[variant.repoId]) {
+            if (v.id == variant.id) {
+                m_downloadTotalBytes = v.sizeBytes;
+                break;
+            }
+        }
+    }
+
     m_downloadCompletedBytes = 0;
     m_downloadCancelled = false;
 
@@ -384,8 +397,12 @@ void ModelManager::updateVariantSize(const QString &repoId, const QString &fileN
 }
 
 QString ModelManager::variantDirectory(const ModelVariant &variant) const {
-    const QString sanitizedId = QString(variant.id).replace(QLatin1Char('/'), QLatin1Char('_'));
-    return QDir(m_storageDirectory).filePath(sanitizedId);
+    const QString baseDir = storageDirectory();
+    QString sanitizedId = variant.id;
+    sanitizedId.replace(QLatin1Char('/'), QLatin1Char('_'));
+    sanitizedId.replace(QLatin1Char(':'), QLatin1Char('_'));
+
+    return QDir(baseDir).filePath(sanitizedId);
 }
 
 double ModelManager::estimateVramGb(qint64 sizeBytes) {
@@ -421,10 +438,7 @@ QString ModelManager::resolveUrl(const QString &repoId, const QString &fileName)
 }
 
 void ModelManager::loadSelectedModel() {
-    if (m_storageDirectory.isEmpty())
-        return;
-
-    const QString configPath = QDir(m_storageDirectory).filePath(QStringLiteral("selected_model.json"));
+    const QString configPath = QDir(storageDirectory()).filePath(QStringLiteral("selected_model.json"));
     QFile file(configPath);
     if (!file.open(QIODevice::ReadOnly))
         return;
@@ -440,10 +454,7 @@ void ModelManager::loadSelectedModel() {
 }
 
 void ModelManager::saveSelectedModel(const ModelVariant &variant) {
-    if (m_storageDirectory.isEmpty())
-        return;
-
-    const QString configPath = QDir(m_storageDirectory).filePath(QStringLiteral("selected_model.json"));
+    const QString configPath = QDir(storageDirectory()).filePath(QStringLiteral("selected_model.json"));
     QFile file(configPath);
     if (!file.open(QIODevice::WriteOnly))
         return;
@@ -471,7 +482,7 @@ void ModelManager::clearDownloadState() {
 }
 
 QString ModelManager::hfExecutable() const {
-    return QStandardPaths::findExecutable(QStringLiteral("huggingface-cli"));
+    return QStandardPaths::findExecutable(QStringLiteral("hf"));
 }
 
 qint64 ModelManager::localDownloadBytes() const {
@@ -479,10 +490,15 @@ qint64 ModelManager::localDownloadBytes() const {
         return 0;
 
     qint64 total = 0;
-    QDir dir(m_downloadDirectory);
-    const auto entries = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
-    for (const QFileInfo &info : entries) {
-        total += info.size();
+    QDirIterator it(
+        m_downloadDirectory,
+        QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot,
+        QDirIterator::Subdirectories
+    );
+
+    while (it.hasNext()) {
+        it.next();
+        total += it.fileInfo().size();
     }
 
     return total;

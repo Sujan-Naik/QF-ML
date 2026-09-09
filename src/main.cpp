@@ -31,6 +31,12 @@ static LlamaManager::Backend configuredLlamaBackend() {
 }
 
 int main(int argc, char *argv[]) {
+
+    QCoreApplication::setOrganizationName("QuestFarer");
+    QCoreApplication::setApplicationName("qf-ml");
+    QCoreApplication::setApplicationVersion("0.0");
+
+
     qputenv(
         "QTWEBENGINE_CHROMIUM_FLAGS",
         "--no-sandbox "

@@ -384,6 +384,8 @@ void ModelDialog::chooseDirectory() {
 }
 
 void ModelDialog::repositorySelectionChanged() {
+    m_localModelList->clearSelection();
+
     const QString repoId = selectedRepoId();
 
     m_variantList->clear();
@@ -433,7 +435,7 @@ void ModelDialog::populateLocalModels() {
     const QString previousPath = selectedLocalModelPath();
     m_localModelList->clear();
 
-    const QDir directory(QFPaths::llmModelsDir());
+    const QDir directory(m_inference->modelDirectory());
     if (!directory.exists()) {
         m_localModelInfoLabel->setText(
             QStringLiteral("LLM model directory does not exist.")
@@ -652,6 +654,10 @@ void ModelDialog::populateVariants() {
         }
     }
 
+    if (!m_variantList->currentItem() && m_variantList->count() > 0) {
+        m_variantList->setCurrentRow(0);
+    }
+
     updateVariantInfo();
     updateButtons();
 }
@@ -782,7 +788,7 @@ void ModelDialog::updateButtons() {
     bool canDownload = false;
     bool canSelect = false;
 
-    if (!localPath.isEmpty()) {
+    if (m_localModelList->currentItem() && !localPath.isEmpty()) {
         canSelect = QFileInfo::exists(localPath);
     } else if (!repoId.isEmpty() && !variantId.isEmpty()) {
         const auto variants = m_inference->remoteLlmVariants(repoId);
