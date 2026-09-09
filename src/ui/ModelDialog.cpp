@@ -384,10 +384,12 @@ void ModelDialog::chooseDirectory() {
 }
 
 void ModelDialog::repositorySelectionChanged() {
-    m_localModelList->clearSelection();
+    if (m_repositoryList->currentItem()) {
+        const QSignalBlocker blocker(m_localModelList);
+        m_localModelList->clearSelection();
+    }
 
     const QString repoId = selectedRepoId();
-
     m_variantList->clear();
     m_modelInfoLabel->clear();
 
@@ -402,6 +404,7 @@ void ModelDialog::repositorySelectionChanged() {
 
 void ModelDialog::variantSelectionChanged() {
     if (m_variantList->currentItem()) {
+        const QSignalBlocker blocker(m_localModelList);
         m_localModelList->clearSelection();
     }
     updateVariantInfo();
@@ -410,6 +413,8 @@ void ModelDialog::variantSelectionChanged() {
 
 void ModelDialog::localModelSelectionChanged() {
     if (m_localModelList->currentItem()) {
+        const QSignalBlocker blocker1(m_repositoryList);
+        const QSignalBlocker blocker2(m_variantList);
         m_repositoryList->clearSelection();
         m_variantList->clearSelection();
         m_modelInfoLabel->clear();
@@ -514,11 +519,11 @@ void ModelDialog::updateLocalModelInfo() {
 
     const QString path = selectedLocalModelPath();
     if (path.isEmpty()) {
-        if (m_localModelList->count() == 0) {
-            m_localModelInfoLabel->setText(
-                QStringLiteral("No local model selected.")
-            );
-        }
+        m_localModelInfoLabel->setText(
+            m_localModelList->count() == 0
+                ? QStringLiteral("No local model selected.")
+                : QStringLiteral("Select a local model to view details.")
+        );
         return;
     }
 
@@ -535,7 +540,8 @@ void ModelDialog::updateLocalModelInfo() {
         : QString();
 
     const bool active =
-        activeModelId == path || activeModelId == fileInfo.fileName();
+        !activeModelId.isEmpty() &&
+        (activeModelId == path || activeModelId == fileInfo.fileName());
 
     const QString status = active ? QStringLiteral("ACTIVE")
                                   : QStringLiteral("INSTALLED");
@@ -788,9 +794,7 @@ void ModelDialog::updateButtons() {
     bool canDownload = false;
     bool canSelect = false;
 
-    if (m_localModelList->currentItem() && !localPath.isEmpty()) {
-        canSelect = QFileInfo::exists(localPath);
-    } else if (!repoId.isEmpty() && !variantId.isEmpty()) {
+    if (!repoId.isEmpty() && !variantId.isEmpty()) {
         const auto variants = m_inference->remoteLlmVariants(repoId);
         for (const auto &variant : variants) {
             if (variant.id == variantId) {
@@ -799,6 +803,8 @@ void ModelDialog::updateButtons() {
                 break;
             }
         }
+    } else if (m_localModelList->currentItem() && !localPath.isEmpty()) {
+        canSelect = QFileInfo::exists(localPath);
     }
 
     m_downloadButton->setEnabled(canDownload);
