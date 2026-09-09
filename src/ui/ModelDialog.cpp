@@ -1,10 +1,12 @@
 #include "ui/ModelDialog.h"
 
 #include "../../include/inference/InferenceService.h"
+#include "app/QfPaths.h"
 
 #include <QComboBox>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -15,8 +17,7 @@
 #include <QVBoxLayout>
 
 #include "ui/QuantizationGuideDialog.h"
-
-
+#include <QDirIterator>
 namespace {
     QString formatSize(
         qint64 bytes
@@ -59,7 +60,6 @@ namespace {
         );
     }
 
-
     QString formatDownloads(
         qint64 downloads
     ) {
@@ -97,13 +97,12 @@ namespace {
     }
 }
 
-
 ModelDialog::ModelDialog(
     InferenceService *inferenceService,
     QWidget *parent
 )
     : QDialog(parent)
-      , m_inference(inferenceService) {
+    , m_inference(inferenceService) {
     setWindowTitle(
         QStringLiteral(
             "QF-ML — Local Models"
@@ -111,18 +110,14 @@ ModelDialog::ModelDialog(
     );
 
     resize(
-        1000,
-        700
+        1100,
+        800
     );
 
     auto *root =
             new QVBoxLayout(
                 this
             );
-
-    // -------------------------------------------------------------------------
-    // Model directory
-    // -------------------------------------------------------------------------
 
     auto *directoryLayout =
             new QHBoxLayout();
@@ -147,12 +142,15 @@ ModelDialog::ModelDialog(
             );
 
     m_directoryButton =
-            new QPushButton(
-                QStringLiteral(
-                    "Choose..."
-                ),
-                this
-            );
+        new QPushButton(
+            QStringLiteral(
+                "Choose..."
+            ),
+            this
+        );
+
+    m_directoryButton->setAutoDefault(false);
+    m_directoryButton->setDefault(false);
 
     directoryLayout->addWidget(
         m_directoryLabel,
@@ -167,9 +165,74 @@ ModelDialog::ModelDialog(
         directoryLayout
     );
 
-    // -------------------------------------------------------------------------
-    // Search
-    // -------------------------------------------------------------------------
+    auto *localHeaderLayout =
+            new QHBoxLayout();
+
+    localHeaderLayout->addWidget(
+        new QLabel(
+            QStringLiteral(
+                "Local installed models"
+            ),
+            this
+        )
+    );
+
+    localHeaderLayout->addStretch();
+
+    m_refreshLocalButton =
+            new QPushButton(
+                QStringLiteral(
+                    "Refresh"
+                ),
+                this
+            );
+
+    localHeaderLayout->addWidget(
+        m_refreshLocalButton
+    );
+
+    root->addLayout(
+        localHeaderLayout
+    );
+
+    m_localModelList =
+            new QListWidget(
+                this
+            );
+
+    m_localModelList->setMinimumHeight(
+        150
+    );
+
+    root->addWidget(
+        m_localModelList
+    );
+
+    m_localModelInfoLabel =
+            new QLabel(
+                this
+            );
+
+    m_localModelInfoLabel->setWordWrap(
+        true
+    );
+
+    m_localModelInfoLabel->setMinimumHeight(
+        70
+    );
+
+    root->addWidget(
+        m_localModelInfoLabel
+    );
+
+    root->addWidget(
+        new QLabel(
+            QStringLiteral(
+                "Download models from Hugging Face"
+            ),
+            this
+        )
+    );
 
     auto *searchLayout =
             new QHBoxLayout();
@@ -316,10 +379,6 @@ ModelDialog::ModelDialog(
         searchLayout
     );
 
-    // -------------------------------------------------------------------------
-    // Repository / variant lists
-    // -------------------------------------------------------------------------
-
     auto *listsLayout =
             new QHBoxLayout();
 
@@ -380,10 +439,6 @@ ModelDialog::ModelDialog(
         1
     );
 
-    // -------------------------------------------------------------------------
-    // Variant information
-    // -------------------------------------------------------------------------
-
     m_modelInfoLabel =
             new QLabel(
                 this
@@ -414,10 +469,6 @@ ModelDialog::ModelDialog(
         m_statusLabel
     );
 
-    // -------------------------------------------------------------------------
-    // Download progress
-    // -------------------------------------------------------------------------
-
     m_progress =
             new QProgressBar(
                 this
@@ -430,10 +481,6 @@ ModelDialog::ModelDialog(
     root->addWidget(
         m_progress
     );
-
-    // -------------------------------------------------------------------------
-    // Actions
-    // -------------------------------------------------------------------------
 
     auto *actionsLayout =
             new QHBoxLayout();
@@ -480,15 +527,25 @@ ModelDialog::ModelDialog(
         actionsLayout
     );
 
-    // -------------------------------------------------------------------------
-    // Connections
-    // -------------------------------------------------------------------------
-
     connect(
         m_directoryButton,
         &QPushButton::clicked,
         this,
         &ModelDialog::chooseDirectory
+    );
+
+    connect(
+        m_refreshLocalButton,
+        &QPushButton::clicked,
+        this,
+        &ModelDialog::refreshLocalModels
+    );
+
+    connect(
+        m_localModelList,
+        &QListWidget::itemSelectionChanged,
+        this,
+        &ModelDialog::localModelSelectionChanged
     );
 
     connect(
@@ -588,6 +645,8 @@ ModelDialog::ModelDialog(
                         directory
                     ).absolutePath()
                 );
+
+                populateLocalModels();
             }
         );
 
@@ -596,6 +655,8 @@ ModelDialog::ModelDialog(
             &InferenceService::selectedLlmModelChanged,
             this,
             [this]() {
+                populateLocalModels();
+                updateLocalModelInfo();
                 populateVariants();
                 updateVariantInfo();
                 updateButtons();
@@ -636,11 +697,13 @@ ModelDialog::ModelDialog(
                 ->modelDirectory()
             ).absolutePath()
         );
+
+        populateLocalModels();
     }
 
+    updateLocalModelInfo();
     updateButtons();
 }
-
 
 void ModelDialog::openQuantizationGuide() {
     QuantizationGuideDialog guide(
@@ -649,7 +712,6 @@ void ModelDialog::openQuantizationGuide() {
 
     guide.exec();
 }
-
 
 void ModelDialog::search() {
     if (!m_inference)
@@ -672,12 +734,7 @@ void ModelDialog::search() {
     );
 }
 
-
 void ModelDialog::recommended() {
-    /*
-     * This is a useful starting search, not a hardcoded
-     * model recommendation list.
-     */
     m_searchEdit->setText(
         QStringLiteral(
             "Qwen Coder"
@@ -686,7 +743,6 @@ void ModelDialog::recommended() {
 
     search();
 }
-
 
 void ModelDialog::chooseDirectory() {
     if (!m_inference)
@@ -716,9 +772,12 @@ void ModelDialog::chooseDirectory() {
                 "Could not use the selected directory."
             )
         );
-    }
-}
 
+        return;
+    }
+
+    populateLocalModels();
+}
 
 void ModelDialog::repositorySelectionChanged() {
     const QString repoId =
@@ -743,12 +802,241 @@ void ModelDialog::repositorySelectionChanged() {
     );
 }
 
-
 void ModelDialog::variantSelectionChanged() {
     updateVariantInfo();
     updateButtons();
 }
 
+void ModelDialog::localModelSelectionChanged() {
+    updateLocalModelInfo();
+}
+
+void ModelDialog::refreshLocalModels() {
+    populateLocalModels();
+    updateLocalModelInfo();
+
+    if (m_inference) {
+        m_statusLabel->setText(
+            QStringLiteral(
+                "Local model list refreshed."
+            )
+        );
+    }
+}
+
+void ModelDialog::populateLocalModels() {
+    if (!m_inference)
+        return;
+
+    const QString previousPath =
+            selectedLocalModelPath();
+
+    m_localModelList->clear();
+
+    const QDir directory(
+        QFPaths::llmModelsDir()
+    );
+
+    if (!directory.exists()) {
+        m_localModelInfoLabel->setText(
+            QStringLiteral(
+                "LLM model directory does not exist."
+            )
+        );
+
+        return;
+    }
+
+    const QStringList filters = {
+        QStringLiteral("*.gguf"),
+        QStringLiteral("*.GGUF"),
+        QStringLiteral("*.bin"),
+        QStringLiteral("*.BIN"),
+        QStringLiteral("*.safetensors"),
+        QStringLiteral("*.SAFETENSORS")
+    };
+
+    QDirIterator iterator(
+        directory.absolutePath(),
+        filters,
+        QDir::Files |
+        QDir::Readable,
+        QDirIterator::Subdirectories
+    );
+
+    const QString activeModelId =
+            m_inference
+            ->selectedLlmModelId();
+
+    int modelCount = 0;
+
+    while (iterator.hasNext()) {
+        const QString path =
+                iterator.next();
+
+        const QFileInfo fileInfo(path);
+
+        const bool active =
+                !activeModelId.isEmpty() &&
+                (
+                    activeModelId == path ||
+                    activeModelId ==
+                    fileInfo.fileName()
+                );
+
+        const QString status =
+                active
+                    ? QStringLiteral(
+                        "ACTIVE"
+                    )
+                    : QStringLiteral(
+                        "INSTALLED"
+                    );
+
+        auto *item =
+                new QListWidgetItem(
+                    QStringLiteral(
+                        "%1\n"
+                        "   %2 • %3"
+                    ).arg(
+                        fileInfo.fileName(),
+                        formatSize(
+                            fileInfo.size()
+                        ),
+                        status
+                    )
+                );
+
+        item->setData(
+            Qt::UserRole,
+            path
+        );
+
+        item->setSizeHint(
+            QSize(
+                0,
+                58
+            )
+        );
+
+        m_localModelList->addItem(
+            item
+        );
+
+        if (
+            path ==
+            previousPath
+        ) {
+            m_localModelList
+                    ->setCurrentItem(
+                        item
+                    );
+        } else if (
+            active
+        ) {
+            m_localModelList
+                    ->setCurrentItem(
+                        item
+                    );
+        }
+
+        ++modelCount;
+    }
+
+    if (modelCount == 0) {
+        m_localModelInfoLabel->setText(
+            QStringLiteral(
+                "No supported local LLM model files found."
+            )
+        );
+
+        return;
+    }
+
+    m_localModelInfoLabel->setText(
+        QStringLiteral(
+            "%1 local LLM model file%2 found."
+        ).arg(
+            modelCount
+        ).arg(
+            modelCount == 1
+                ? QString()
+                : QStringLiteral("s")
+        )
+    );
+}
+
+void ModelDialog::updateLocalModelInfo() {
+    if (!m_localModelList)
+        return;
+
+    const QString path =
+            selectedLocalModelPath();
+
+    if (path.isEmpty()) {
+        if (
+            m_localModelList->count() == 0
+        ) {
+            m_localModelInfoLabel->setText(
+                QStringLiteral(
+                    "No local model selected."
+                )
+            );
+        }
+
+        return;
+    }
+
+    const QFileInfo fileInfo(
+        path
+    );
+
+    if (!fileInfo.exists()) {
+        m_localModelInfoLabel->setText(
+            QStringLiteral(
+                "The selected local model no longer exists."
+            )
+        );
+
+        return;
+    }
+
+    const QString activeModelId =
+            m_inference
+            ? m_inference
+              ->selectedLlmModelId()
+            : QString();
+
+    const bool active =
+            activeModelId == path ||
+            activeModelId ==
+            fileInfo.fileName();
+
+    const QString status =
+            active
+                ? QStringLiteral(
+                    "ACTIVE"
+                )
+                : QStringLiteral(
+                    "INSTALLED"
+                );
+
+    m_localModelInfoLabel->setText(
+        QStringLiteral(
+            "<b>%1</b><br>"
+            "Path: %2<br>"
+            "Size: %3<br>"
+            "Status: <b>%4</b>"
+        ).arg(
+            fileInfo.fileName(),
+            fileInfo.absoluteFilePath(),
+            formatSize(
+                fileInfo.size()
+            ),
+            status
+        )
+    );
+}
 
 void ModelDialog::populateRepositories() {
     if (!m_inference)
@@ -818,7 +1106,6 @@ void ModelDialog::populateRepositories() {
 
     updateButtons();
 }
-
 
 void ModelDialog::populateVariants() {
     if (!m_inference)
@@ -963,11 +1250,9 @@ void ModelDialog::populateVariants() {
     updateButtons();
 }
 
-
 void ModelDialog::onRemoteModelsChanged() {
     populateRepositories();
 }
-
 
 void ModelDialog::onRemoteVariantsChanged(
     const QString &repoId
@@ -981,7 +1266,6 @@ void ModelDialog::onRemoteVariantsChanged(
 
     populateVariants();
 }
-
 
 QString ModelDialog::selectedRepoId() const {
     const QListWidgetItem *item =
@@ -998,7 +1282,6 @@ QString ModelDialog::selectedRepoId() const {
             .toString();
 }
 
-
 QString ModelDialog::selectedVariantId() const {
     const QListWidgetItem *item =
             m_variantList
@@ -1014,6 +1297,20 @@ QString ModelDialog::selectedVariantId() const {
             .toString();
 }
 
+QString ModelDialog::selectedLocalModelPath() const {
+    const QListWidgetItem *item =
+            m_localModelList
+            ->currentItem();
+
+    if (!item)
+        return QString();
+
+    return item
+            ->data(
+                Qt::UserRole
+            )
+            .toString();
+}
 
 void ModelDialog::updateVariantInfo() {
     if (!m_inference) {
@@ -1143,7 +1440,6 @@ void ModelDialog::updateVariantInfo() {
     m_modelInfoLabel->clear();
 }
 
-
 void ModelDialog::downloadSelected() {
     if (!m_inference)
         return;
@@ -1192,7 +1488,6 @@ void ModelDialog::downloadSelected() {
         }
     }
 }
-
 
 void ModelDialog::selectSelected() {
     if (!m_inference)
@@ -1246,11 +1541,13 @@ void ModelDialog::selectSelected() {
                 )
             );
 
+            populateLocalModels();
+            updateLocalModelInfo();
+
             return;
         }
     }
 }
-
 
 void ModelDialog::onDownloadStarted(
     const QString &modelId
@@ -1272,7 +1569,6 @@ void ModelDialog::onDownloadStarted(
 
     updateButtons();
 }
-
 
 void ModelDialog::onDownloadProgress(
     const QString &modelId,
@@ -1331,7 +1627,6 @@ void ModelDialog::onDownloadProgress(
     updateButtons();
 }
 
-
 void ModelDialog::onDownloadFinished(
     const QString &modelId
 ) {
@@ -1352,11 +1647,12 @@ void ModelDialog::onDownloadFinished(
         )
     );
 
+    populateLocalModels();
     populateVariants();
+    updateLocalModelInfo();
     updateVariantInfo();
     updateButtons();
 }
-
 
 void ModelDialog::onDownloadError(
     const QString &modelId,
@@ -1381,9 +1677,10 @@ void ModelDialog::onDownloadError(
         )
     );
 
+    populateLocalModels();
+    updateLocalModelInfo();
     updateButtons();
 }
-
 
 void ModelDialog::updateButtons() {
     if (!m_inference) {

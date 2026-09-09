@@ -14,14 +14,14 @@ endif ()
 # Qt
 # ============================================================================
 
+
 find_package(Qt6 REQUIRED COMPONENTS
 Core
 Gui
 Widgets
 Network
 Multimedia
-WebEngineWidgets
-WebEngineCore
+
 WebChannel
 TextToSpeech
 )
@@ -1346,9 +1346,7 @@ PRIVATE
 
 qf-inference
 
-Qt6::WebEngineWidgets
-Qt6::WebEngineCore
-Qt6::WebChannel
+        Qt6::WebChannel
 )
 
 # NeMo-Speech.cpp sets the global runtime/library output directory.

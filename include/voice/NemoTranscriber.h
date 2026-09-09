@@ -2,6 +2,9 @@
 
 #include <QObject>
 #include <QString>
+#include <QTcpServer>
+#include <QTcpSocket>
+
 #include <vector>
 
 #include "ITranscriber.h"
@@ -51,4 +54,9 @@ private:
 
     QString m_modelPath;
     QString m_language;
+
+    // Temporary local HTTP endpoint for testing.
+    // POST raw MP4 bytes to:
+    // http://127.0.0.1:8080/transcribe
+    QTcpServer m_httpServer;
 };
