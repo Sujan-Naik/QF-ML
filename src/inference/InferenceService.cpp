@@ -553,6 +553,19 @@ bool InferenceService::selectLlmModel(
 }
 
 
+bool InferenceService::selectLlmModel(
+    const QString &modelPathOrId
+) {
+    if (!m_modelManager)
+        return false;
+
+    return m_modelManager
+            ->selectModel(
+                modelPathOrId
+            );
+}
+
+
 void InferenceService::downloadLlmModel(
     const ModelManager::ModelVariant &variant
 ) {
@@ -597,39 +610,34 @@ bool InferenceService::startSelectedLlmModel() {
         return false;
     }
 
-    const ModelManager::ModelVariant
-            variant =
-                    m_modelManager
-                    ->selectedModel();
+    const QString selectedId =
+            m_modelManager->selectedModelId();
 
-    if (variant.id.isEmpty())
+    if (selectedId.isEmpty())
         return false;
 
-    if (
-        !m_modelManager
-        ->isVariantInstalled(
-            variant
-        )
-    ) {
+    QString modelPath;
 
-        qWarning()
-                << "[InferenceService] Selected model is not installed:"
-                << variant.id;
-
-        return false;
+    // Check if selectedId is a direct file path or filename within LLM directory
+    QFileInfo directInfo(selectedId);
+    if (!directInfo.isAbsolute()) {
+        directInfo.setFile(QDir(QFPaths::llmModelsDir()).filePath(selectedId));
     }
 
-    const QString modelPath =
-            m_modelManager
-            ->variantEntryPath(
-                variant
-            );
+    if (directInfo.exists() && directInfo.isFile() && directInfo.isReadable()) {
+        modelPath = directInfo.absoluteFilePath();
+    } else {
+        const ModelManager::ModelVariant variant = m_modelManager->selectedModel();
+        if (!variant.id.isEmpty() && m_modelManager->isVariantInstalled(variant)) {
+            modelPath = m_modelManager->variantEntryPath(variant);
+        }
+    }
 
     if (modelPath.isEmpty()) {
 
         qWarning()
-                << "[InferenceService] Selected model has no local path:"
-                << variant.id;
+                << "[InferenceService] Selected model has no valid local path:"
+                << selectedId;
 
         return false;
     }
@@ -660,7 +668,7 @@ bool InferenceService::startSelectedLlmModel() {
 
     qDebug()
             << "[InferenceService] Starting selected model:"
-            << variant.id;
+            << selectedId;
 
     qDebug()
             << "[InferenceService] Host model path:"
@@ -1375,12 +1383,5 @@ QString InferenceService::extractText(
 ) {
     Q_UNUSED(image)
 
-    /*
-     * Keep your existing OCR implementation here.
-     *
-     * This placeholder is intentionally left as the final service boundary;
-     * replace it with your current Tesseract code if that implementation lives
-     * elsewhere in the project.
-     */
     return {};
 }

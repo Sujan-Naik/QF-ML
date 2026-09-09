@@ -14,10 +14,9 @@
 #include "ModelManager.h"
 #include "../voice/ITranscriber.h"
 
-
 class LlmClient;
 class TtsManager;
-
+class QNetworkAccessManager;
 
 class InferenceService : public QObject {
     Q_OBJECT
@@ -84,6 +83,10 @@ public:
 
     bool selectLlmModel(
         const ModelManager::ModelVariant &variant
+    );
+
+    bool selectLlmModel(
+        const QString &modelPathOrId
     );
 
     void downloadLlmModel(
@@ -254,75 +257,35 @@ signals:
 
 private slots:
     void onLlmServerReady();
-
-    void onLlamaError(
-        const QString &error
-    );
-
+    void onLlamaError(const QString &error);
     void onTtsServerReady();
-
-    void onModelSelected(
-        const QString &modelId
-    );
+    void onModelSelected(const QString &modelId);
 
 private:
     bool startSelectedLlmModel();
 
-    QString resolveSttModelPath(
-        const QString &requestedPath
-    ) const;
-
-    QString resolveSttModelFilename(
-        SttModel model
-    ) const;
-
-    QString sttModelToString(
-        SttModel model
-    ) const;
-
-    SttModel sttModelFromString(
-        const QString &model
-    ) const;
-
+    QString resolveSttModelFilename(SttModel model) const;
+    QString sttModelToString(SttModel model) const;
+    SttModel sttModelFromString(const QString &model) const;
     int resolveSttGpu() const;
+    QString resolveSttModelPath(const QString &requestedPath) const;
 
-private:
-    std::unique_ptr<ModelManager>
-    m_modelManager;
+    std::unique_ptr<ModelManager> m_modelManager;
+    std::unique_ptr<LlamaManager> m_llamaManager;
+    std::unique_ptr<LlmClient> m_llmClient;
+    std::unique_ptr<TtsManager> m_ttsManager;
+    std::unique_ptr<ITranscriber> m_stt;
+    QNetworkAccessManager *m_networkManager{nullptr};
 
-    std::unique_ptr<LlamaManager>
-    m_llamaManager;
-
-    std::unique_ptr<LlmClient>
-    m_llmClient;
-
-    std::unique_ptr<TtsManager>
-    m_ttsManager;
-
-    std::unique_ptr<ITranscriber>
-    m_stt;
-
-    QNetworkAccessManager *
-            m_networkManager = nullptr;
+    LlamaManager::Backend m_llamaBackend{LlamaManager::Backend::Vulkan};
+    SttModel m_sttModel{SttModel::Nemotron35};
 
     QString m_llmEndpoint;
-
     QString m_llmModel;
+    QString m_sttModelPath;
 
-    bool m_initialized = false;
-
-    bool m_llmReady = false;
-    bool m_ttsReady = false;
-    bool m_sttReady = false;
-
-    LlamaManager::Backend
-    m_llamaBackend =
-            LlamaManager::Backend::Vulkan;
-
-    SttModel
-    m_sttModel =
-            SttModel::Nemotron35;
-
-    QString
-    m_sttModelPath;
+    bool m_initialized{false};
+    bool m_llmReady{false};
+    bool m_sttReady{false};
+    bool m_ttsReady{false};
 };

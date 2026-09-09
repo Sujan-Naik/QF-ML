@@ -84,6 +84,10 @@ public:
         const ModelVariant &variant
     );
 
+    bool selectModel(
+        const QString &modelPathOrId
+    );
+
     void downloadModel(
         const ModelVariant &variant
     );

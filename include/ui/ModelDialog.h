@@ -1,7 +1,8 @@
-
-#pragma once
+#ifndef MODELDIALOG_H
+#define MODELDIALOG_H
 
 #include <QDialog>
+#include <QString>
 
 class InferenceService;
 class QComboBox;
@@ -19,124 +20,72 @@ public:
         InferenceService *inferenceService,
         QWidget *parent = nullptr
     );
+    ~ModelDialog() override = default;
 
 private slots:
-    void search();
-
-    void recommended();
-
-    void openQuantizationGuide();
-
     void chooseDirectory();
-
+    void search();
+    void recommended();
+    void openQuantizationGuide();
     void repositorySelectionChanged();
-
     void variantSelectionChanged();
-
     void localModelSelectionChanged();
-
     void refreshLocalModels();
-
     void downloadSelected();
-
     void selectSelected();
 
     void onRemoteModelsChanged();
-
-    void onRemoteVariantsChanged(
-        const QString &repoId
-    );
-
-    void onDownloadStarted(
-        const QString &modelId
-    );
-
+    void onRemoteVariantsChanged(const QString &repoId);
+    void onDownloadStarted(const QString &modelId);
     void onDownloadProgress(
         const QString &modelId,
         qint64 received,
         qint64 total
     );
-
-    void onDownloadFinished(
-        const QString &modelId
-    );
-
+    void onDownloadFinished(const QString &modelId);
     void onDownloadError(
         const QString &modelId,
         const QString &error
     );
 
 private:
-    QString selectedRepoId() const;
-
-    QString selectedVariantId() const;
-
-    QString selectedLocalModelPath() const;
-
     void populateLocalModels();
-
     void populateRepositories();
-
     void populateVariants();
-
     void updateLocalModelInfo();
-
     void updateVariantInfo();
-
     void updateButtons();
 
-private:
-    InferenceService *
-            m_inference = nullptr;
+    bool selectLocalModelPath(const QString &path);
 
-    QLineEdit *
-            m_searchEdit = nullptr;
+    QString selectedRepoId() const;
+    QString selectedVariantId() const;
+    QString selectedLocalModelPath() const;
 
-    QComboBox *
-            m_vramFilter = nullptr;
+    InferenceService *m_inference{nullptr};
 
-    QPushButton *
-            m_searchButton = nullptr;
+    QLabel *m_directoryLabel{nullptr};
+    QPushButton *m_directoryButton{nullptr};
 
-    QPushButton *
-            m_recommendedButton = nullptr;
+    QPushButton *m_refreshLocalButton{nullptr};
+    QListWidget *m_localModelList{nullptr};
+    QLabel *m_localModelInfoLabel{nullptr};
 
-    QPushButton *
-            m_quantizationGuideButton = nullptr;
+    QLineEdit *m_searchEdit{nullptr};
+    QPushButton *m_searchButton{nullptr};
+    QPushButton *m_recommendedButton{nullptr};
+    QPushButton *m_quantizationGuideButton{nullptr};
+    QComboBox *m_vramFilter{nullptr};
 
-    QPushButton *
-            m_directoryButton = nullptr;
+    QListWidget *m_repositoryList{nullptr};
+    QListWidget *m_variantList{nullptr};
 
-    QPushButton *
-            m_refreshLocalButton = nullptr;
+    QLabel *m_modelInfoLabel{nullptr};
+    QLabel *m_statusLabel{nullptr};
+    QProgressBar *m_progress{nullptr};
 
-    QLabel *
-            m_directoryLabel = nullptr;
-
-    QListWidget *
-            m_localModelList = nullptr;
-
-    QListWidget *
-            m_repositoryList = nullptr;
-
-    QListWidget *
-            m_variantList = nullptr;
-
-    QLabel *
-            m_localModelInfoLabel = nullptr;
-
-    QLabel *
-            m_modelInfoLabel = nullptr;
-
-    QLabel *
-            m_statusLabel = nullptr;
-
-    QProgressBar *
-            m_progress = nullptr;
-
-    QPushButton *
-            m_downloadButton = nullptr;
-
-    QPushButton *
-            m_selectButton = nullptr;
+    QPushButton *m_downloadButton{nullptr};
+    QPushButton *m_selectButton{nullptr};
 };
+
+#endif // MODELDIALOG_H
