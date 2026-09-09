@@ -21,6 +21,7 @@ public:
         QString model = QStringLiteral("local-model");
         double temperature = 0.7;
         int timeoutMs = 120000;
+        QString grammar = QString();
     };
 
     void sendRequest(const Request &request);

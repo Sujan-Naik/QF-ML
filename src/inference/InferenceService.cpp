@@ -717,62 +717,38 @@ void InferenceService::sendChatRequest(
     const QJsonArray &messages,
     const QString &model,
     double temperature,
-    int timeoutMs
+    int timeoutMs,
+    const QString &grammar
 ) {
     if (!m_llmClient)
         return;
 
     if (m_llmEndpoint.isEmpty()) {
-
-        emit llmError(
-            QStringLiteral(
-                "No LLM endpoint is configured."
-            )
-        );
-
+        emit llmError(QStringLiteral("No LLM endpoint is configured."));
         return;
     }
 
     if (!m_llmReady) {
-
-        emit llmError(
-            QStringLiteral(
-                "LLM service is not ready."
-            )
-        );
-
+        emit llmError(QStringLiteral("LLM service is not ready."));
         return;
     }
 
     LlmClient::Request request;
+    request.url = m_llmEndpoint;
+    request.messages = messages;
+    request.model = model.isEmpty() ? m_llmModel : model;
+    request.temperature = temperature;
+    request.timeoutMs = timeoutMs;
+    request.grammar = grammar; // Forward GBNF grammar to request payload
 
-    request.url =
-            m_llmEndpoint;
+    qDebug() << "[InferenceService] Sending chat request"
+             << "model=" << request.model
+             << "messages=" << request.messages.size()
+             << "temperature=" << request.temperature
+             << "timeoutMs=" << request.timeoutMs
+             << "hasGrammar=" << !grammar.isEmpty();
 
-    request.messages =
-            messages;
-
-    request.model =
-            model.isEmpty()
-                ? m_llmModel
-                : model;
-
-    request.temperature =
-            temperature;
-
-    request.timeoutMs =
-            timeoutMs;
-
-    qDebug()
-            << "[InferenceService] Sending chat request"
-            << "model=" << request.model
-            << "messages=" << request.messages.size()
-            << "temperature=" << request.temperature
-            << "timeoutMs=" << request.timeoutMs;
-
-    m_llmClient->sendRequest(
-        request
-    );
+    m_llmClient->sendRequest(request);
 }
 
 

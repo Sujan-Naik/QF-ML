@@ -103,7 +103,8 @@ public:
         const QJsonArray &messages,
         const QString &model = QString(),
         double temperature = 0.7,
-        int timeoutMs = 120000
+        int timeoutMs = 120000,
+        const QString &grammar=QString()
     );
 
     void abortChatRequest();
