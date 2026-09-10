@@ -88,17 +88,24 @@ void LlmClient::sendRequest(
         request.temperature
     );
 
+    if (!request.grammar.isEmpty()) {
+        body.insert(
+            QStringLiteral("grammar"),
+            request.grammar
+        );
+    }
+
     m_streamBuffer.clear();
     m_requestFailed = false;
     m_abortRequested = false;
 
     m_currentReply =
-            m_networkManager->post(
-                networkRequest,
-                QJsonDocument(body).toJson(
-                    QJsonDocument::Compact
-                )
-            );
+        m_networkManager->post(
+            networkRequest,
+            QJsonDocument(body).toJson(
+                QJsonDocument::Compact
+            )
+        );
 
     connect(
         m_currentReply,
