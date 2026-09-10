@@ -340,114 +340,48 @@ QString LlamaManager::dockerImage() const {
 
 
 QStringList LlamaManager::dockerRunArguments() const {
-    const QFileInfo modelInfo(
-        m_modelPath
-    );
-
-    const QString modelDirectory =
-            modelInfo.absolutePath();
-
-    const QString modelFileName =
-            modelInfo.fileName();
+    const QFileInfo modelInfo(m_modelPath);
+    const QString modelDirectory = modelInfo.absolutePath();
+    const QString modelFileName = modelInfo.fileName();
 
     /*
-     * Qwen3-30B-A3B-Instruct-2507 has a native
-     * 262144-token context window.
-     *
-     * This deliberately requests the full context.
+     * Qwen3-30B-A3B-Instruct-2507 supports up to a 262144-token
+     * context window, but allocating that much KV cache on every
+     * start adds real startup latency and does nothing for a
+     * short prompt. Default to a much smaller working context;
+     * expose CONTEXT_SIZE as a member if callers need more.
      */
-    constexpr int CONTEXT_SIZE =
-            262144;
+    const int contextSize = 32768;
 
     QStringList args;
 
-    args
-            << QStringLiteral(
-                "run"
-            )
-            << QStringLiteral(
-                "--rm"
-            )
-            << QStringLiteral(
-                "-d"
-            )
-            << QStringLiteral(
-                "--name"
-            )
-            << QString::fromUtf8(
-                CONTAINER_NAME
-            )
-            << QStringLiteral(
-                "-p"
-            )
-            << QStringLiteral(
-                "127.0.0.1:%1:%2"
-            ).arg(
-                HOST_PORT
-            ).arg(
-                CONTAINER_PORT
-            )
-            << QStringLiteral(
-                "-v"
-            )
-            << QStringLiteral(
-                "%1:/models:ro"
-            ).arg(
-                QDir::toNativeSeparators(
-                    modelDirectory
-                )
-            );
+    args << QStringLiteral("run")
+         << QStringLiteral("--rm")
+         << QStringLiteral("-d")
+         << QStringLiteral("--name")
+         << QString::fromUtf8(CONTAINER_NAME)
+         << QStringLiteral("-p")
+         << QStringLiteral("127.0.0.1:%1:%2").arg(HOST_PORT).arg(CONTAINER_PORT)
+         << QStringLiteral("-v")
+         << QStringLiteral("%1:/models:ro").arg(QDir::toNativeSeparators(modelDirectory));
 
     switch (m_backend) {
         case Backend::Rocm:
-
-            args
-                    << QStringLiteral(
-                        "--device=/dev/kfd"
-                    )
-                    << QStringLiteral(
-                        "--device=/dev/dri"
-                    )
-                    << QStringLiteral(
-                        "--group-add"
-                    )
-                    << QStringLiteral(
-                        "video"
-                    )
-                    << QStringLiteral(
-                        "--ipc=host"
-                    );
-
+            args << QStringLiteral("--device=/dev/kfd")
+                 << QStringLiteral("--device=/dev/dri")
+                 << QStringLiteral("--group-add")
+                 << QStringLiteral("video")
+                 << QStringLiteral("--ipc=host");
             break;
 
         case Backend::Cuda:
-
-            args
-                    << QStringLiteral(
-                        "--gpus"
-                    )
-                    << QStringLiteral(
-                        "all"
-                    );
-
+            args << QStringLiteral("--gpus")
+                 << QStringLiteral("all");
             break;
 
         case Backend::Vulkan:
-
-            args
-                    << QStringLiteral(
-                        "--device=/dev/dri"
-                    );
-
-            break;
-
         case Backend::Intel:
-
-            args
-                    << QStringLiteral(
-                        "--device=/dev/dri"
-                    );
-
+            args << QStringLiteral("--device=/dev/dri");
             break;
 
         case Backend::Cpu:
@@ -455,115 +389,86 @@ QStringList LlamaManager::dockerRunArguments() const {
             break;
     }
 
-    args
-            << dockerImage()
+    args << dockerImage()
 
-            // ---------------------------------------------------------------------
-            // Model
-            // ---------------------------------------------------------------------
+         // ---------------------------------------------------------------
+         // Model
+         // ---------------------------------------------------------------
+         << QStringLiteral("-m")
+         << (QStringLiteral("/models/") + modelFileName)
 
-            << QStringLiteral(
-                "-m"
-            )
-            << (
-                QStringLiteral(
-                    "/models/"
-                ) +
-                modelFileName
-            )
+         // ---------------------------------------------------------------
+         // GPU offload
+         //
+         // This was previously missing entirely, which on most backends
+         // means layers stay on CPU and every token — including short
+         // replies like "hi" — pays full CPU inference cost. Offload
+         // everything; llama.cpp clamps to the model's actual layer count.
+         // ---------------------------------------------------------------
+         << QStringLiteral("-ngl")
+         << QStringLiteral("999")
 
-            // ---------------------------------------------------------------------
-            // HTTP server
-            // ---------------------------------------------------------------------
+         // ---------------------------------------------------------------
+         // HTTP server
+         // ---------------------------------------------------------------
+         << QStringLiteral("--host")
+         << QStringLiteral("0.0.0.0")
+         << QStringLiteral("--port")
+         << QString::number(CONTAINER_PORT)
 
-            << QStringLiteral(
-                "--host"
-            )
-            << QStringLiteral(
-                "0.0.0.0"
-            )
+         // ---------------------------------------------------------------
+         // Context
+         //
+         // Sized to the working default above rather than the model's
+         // theoretical max, so KV-cache allocation at startup is fast
+         // and per-token attention cost isn't inflated for short chats.
+         // ---------------------------------------------------------------
+         << QStringLiteral("--ctx-size")
+         << QString::number(contextSize)
 
-            << QStringLiteral(
-                "--port"
-            )
-            << QString::number(
-                CONTAINER_PORT
-            )
+         // ---------------------------------------------------------------
+         // Batching — larger batches speed up prompt processing;
+         // defaults are conservative for this model size.
+         // ---------------------------------------------------------------
+         << QStringLiteral("--batch-size")
+         << QStringLiteral("2048")
+         << QStringLiteral("--ubatch-size")
+         << QStringLiteral("512")
 
-            // ---------------------------------------------------------------------
-            // Context
-            // ---------------------------------------------------------------------
+         // ---------------------------------------------------------------
+         // Attention
+         // ---------------------------------------------------------------
+         << QStringLiteral("--flash-attn")
+         << QStringLiteral("on")
 
-            << QStringLiteral(
-                "--ctx-size"
-            )
-            << QString::number(
-                CONTEXT_SIZE
-            )
+         // ---------------------------------------------------------------
+         // KV cache — Q8 keeps memory well below F16 while staying
+         // much closer to it in quality than Q4.
+         // ---------------------------------------------------------------
+         << QStringLiteral("--cache-type-k")
+         << QStringLiteral("q8_0")
+         << QStringLiteral("--cache-type-v")
+         << QStringLiteral("q8_0")
+         << QStringLiteral("--kv-offload")
 
-            // ---------------------------------------------------------------------
-            // Attention
-            // ---------------------------------------------------------------------
+         // ---------------------------------------------------------------
+         // Model load — mlock avoids page faults from disk/swap on the
+         // first requests after a fresh container start.
+         // ---------------------------------------------------------------
+         << QStringLiteral("--mlock")
 
-            << QStringLiteral(
-                "--flash-attn"
-            )
-            << QStringLiteral(
-                "on"
-            )
+         // ---------------------------------------------------------------
+         // One sequence — multiple parallel sequences multiply
+         // KV-cache requirements, undesirable on a constrained GPU/RAM.
+         // ---------------------------------------------------------------
+         << QStringLiteral("--parallel")
+         << QStringLiteral("1");
 
-            // ---------------------------------------------------------------------
-            // KV cache
-            //
-            // Q8 KV dramatically reduces the memory footprint compared with
-            // the default F16 KV cache while preserving much more information
-            // than a very aggressive Q4 KV configuration.
-            // ---------------------------------------------------------------------
-
-            << QStringLiteral(
-                "--cache-type-k"
-            )
-            << QStringLiteral(
-                "q8_0"
-            )
-
-            << QStringLiteral(
-                "--cache-type-v"
-            )
-            << QStringLiteral(
-                "q8_0"
-            )
-
-            << QStringLiteral(
-                "--kv-offload"
-            )
-
-            // ---------------------------------------------------------------------
-            // One sequence.
-            //
-            // Multiple parallel sequences multiply KV-cache requirements,
-            // which we do not want on a 12 GB GPU / 32 GB RAM system.
-            // ---------------------------------------------------------------------
-
-            << QStringLiteral(
-                "--parallel"
-            )
-            << QStringLiteral(
-                "1"
-            );
-
-    qDebug()
-            << "[LLAMA] Context:"
-            << CONTEXT_SIZE;
-
-    qDebug()
-            << "[LLAMA] KV cache:"
-            << "K=q8_0"
-            << "V=q8_0";
-
-    qDebug()
-            << "[LLAMA] Flash attention:"
-            << "on";
+    qDebug() << "[LLAMA] Context:" << contextSize;
+    qDebug() << "[LLAMA] GPU layers:" << "999 (all)";
+    qDebug() << "[LLAMA] Batch size:" << "2048 / ubatch 512";
+    qDebug() << "[LLAMA] KV cache:" << "K=q8_0" << "V=q8_0";
+    qDebug() << "[LLAMA] Flash attention:" << "on";
 
     return args;
 }
