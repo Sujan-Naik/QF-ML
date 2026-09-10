@@ -344,13 +344,6 @@ QStringList LlamaManager::dockerRunArguments() const {
     const QString modelDirectory = modelInfo.absolutePath();
     const QString modelFileName = modelInfo.fileName();
 
-    /*
-     * Qwen3-30B-A3B-Instruct-2507 supports up to a 262144-token
-     * context window, but allocating that much KV cache on every
-     * start adds real startup latency and does nothing for a
-     * short prompt. Default to a much smaller working context;
-     * expose CONTEXT_SIZE as a member if callers need more.
-     */
     const int contextSize = 32768;
 
     QStringList args;
@@ -371,7 +364,12 @@ QStringList LlamaManager::dockerRunArguments() const {
                  << QStringLiteral("--device=/dev/dri")
                  << QStringLiteral("--group-add")
                  << QStringLiteral("video")
-                 << QStringLiteral("--ipc=host");
+                 << QStringLiteral("--ipc=host")
+                 // RX 6700 XT is gfx1031 (RDNA2); not on every ROCm
+                 // version's official support list. Override avoids
+                 // silent fallback / degraded kernel selection.
+                 << QStringLiteral("-e")
+                 << QStringLiteral("HSA_OVERRIDE_GFX_VERSION=10.3.0");
             break;
 
         case Backend::Cuda:
@@ -391,88 +389,56 @@ QStringList LlamaManager::dockerRunArguments() const {
 
     args << dockerImage()
 
-         // ---------------------------------------------------------------
          // Model
-         // ---------------------------------------------------------------
          << QStringLiteral("-m")
          << (QStringLiteral("/models/") + modelFileName)
 
-         // ---------------------------------------------------------------
-         // GPU offload
-         //
-         // This was previously missing entirely, which on most backends
-         // means layers stay on CPU and every token — including short
-         // replies like "hi" — pays full CPU inference cost. Offload
-         // everything; llama.cpp clamps to the model's actual layer count.
-         // ---------------------------------------------------------------
-         << QStringLiteral("-ngl")
-         << QStringLiteral("999")
+         // GPU offload: no forced -ngl. Let llama.cpp fit layers to
+         // whatever VRAM is actually free rather than aborting its own
+         // fit logic and dumping the remainder onto CPU.
 
-         // ---------------------------------------------------------------
          // HTTP server
-         // ---------------------------------------------------------------
          << QStringLiteral("--host")
          << QStringLiteral("0.0.0.0")
          << QStringLiteral("--port")
          << QString::number(CONTAINER_PORT)
 
-         // ---------------------------------------------------------------
          // Context
-         //
-         // Sized to the working default above rather than the model's
-         // theoretical max, so KV-cache allocation at startup is fast
-         // and per-token attention cost isn't inflated for short chats.
-         // ---------------------------------------------------------------
          << QStringLiteral("--ctx-size")
          << QString::number(contextSize)
 
-         // ---------------------------------------------------------------
-         // Batching — larger batches speed up prompt processing;
-         // defaults are conservative for this model size.
-         // ---------------------------------------------------------------
+         // Batching
          << QStringLiteral("--batch-size")
          << QStringLiteral("2048")
          << QStringLiteral("--ubatch-size")
          << QStringLiteral("512")
 
-         // ---------------------------------------------------------------
          // Attention
-         // ---------------------------------------------------------------
          << QStringLiteral("--flash-attn")
          << QStringLiteral("on")
 
-         // ---------------------------------------------------------------
-         // KV cache — Q8 keeps memory well below F16 while staying
-         // much closer to it in quality than Q4.
-         // ---------------------------------------------------------------
+         // KV cache
          << QStringLiteral("--cache-type-k")
          << QStringLiteral("q8_0")
          << QStringLiteral("--cache-type-v")
          << QStringLiteral("q8_0")
          << QStringLiteral("--kv-offload")
 
-         // ---------------------------------------------------------------
-         // Model load — mlock avoids page faults from disk/swap on the
-         // first requests after a fresh container start.
-         // ---------------------------------------------------------------
-         << QStringLiteral("--mlock")
+         // Model load — current flag name, replacing deprecated --mlock
+         << QStringLiteral("--load-mode")
+         << QStringLiteral("mlock")
 
-         // ---------------------------------------------------------------
-         // One sequence — multiple parallel sequences multiply
-         // KV-cache requirements, undesirable on a constrained GPU/RAM.
-         // ---------------------------------------------------------------
+         // One sequence
          << QStringLiteral("--parallel")
          << QStringLiteral("1");
 
     qDebug() << "[LLAMA] Context:" << contextSize;
-    qDebug() << "[LLAMA] GPU layers:" << "999 (all)";
     qDebug() << "[LLAMA] Batch size:" << "2048 / ubatch 512";
     qDebug() << "[LLAMA] KV cache:" << "K=q8_0" << "V=q8_0";
     qDebug() << "[LLAMA] Flash attention:" << "on";
 
     return args;
 }
-
 
 void LlamaManager::startDockerContainer() {
     const QString image =
