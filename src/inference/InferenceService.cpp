@@ -1043,7 +1043,8 @@ void InferenceService::sendChatRequest(
     const QString &model,
     double temperature,
     int timeoutMs,
-    const QString &grammar
+    const QString &grammar,
+    const QJsonObject &responseFormat
 )
 {
     if (!m_llmClient)
@@ -1090,8 +1091,30 @@ void InferenceService::sendChatRequest(
     request.timeoutMs =
         timeoutMs;
 
-    request.grammar =
-        grammar;
+    /*
+     * GBNF is only meaningful to the local llama.cpp backend.
+     */
+    if (
+        m_llmConfig.mode ==
+        LlmMode::Local
+    ) {
+
+        request.grammar =
+            grammar;
+    }
+
+    /*
+     * JSON Schema structured output is for remote
+     * OpenAI-compatible providers such as OpenRouter.
+     */
+    if (
+        m_llmConfig.mode ==
+        LlmMode::Remote
+    ) {
+
+        request.responseFormat =
+            responseFormat;
+    }
 
     if (
         m_llmConfig.mode ==
@@ -1126,7 +1149,9 @@ void InferenceService::sendChatRequest(
         << "timeoutMs="
         << request.timeoutMs
         << "hasGrammar="
-        << !grammar.isEmpty()
+        << !request.grammar.isEmpty()
+        << "hasResponseFormat="
+        << !request.responseFormat.isEmpty()
         << "authenticated="
         << (
             request.authType ==

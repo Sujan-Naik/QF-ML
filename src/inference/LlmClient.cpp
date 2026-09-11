@@ -8,6 +8,7 @@
 #include <QNetworkRequest>
 #include <QUrl>
 
+
 LlmClient::LlmClient(
     QNetworkAccessManager *networkManager,
     QObject *parent
@@ -42,19 +43,35 @@ void LlmClient::sendRequest(
     );
 
     if (url.scheme().isEmpty()) {
+
         url.setScheme(
             QStringLiteral("http")
         );
     }
 
-    if (!url.isValid() ||
-        url.isEmpty()) {
+    if (
+        !url.isValid() ||
+        url.isEmpty()
+    ) {
 
         emit requestError(
             QStringLiteral(
                 "Invalid LLM URL: %1"
             ).arg(
                 url.errorString()
+            )
+        );
+
+        return;
+    }
+
+    if (url.host().isEmpty()) {
+
+        emit requestError(
+            QStringLiteral(
+                "LLM URL has no host: %1"
+            ).arg(
+                request.url
             )
         );
 
@@ -72,6 +89,10 @@ void LlmClient::sendRequest(
         )
     );
 
+    /*
+     * OpenAI-compatible chat-completions endpoints stream
+     * Server-Sent Events.
+     */
     networkRequest.setRawHeader(
         QByteArrayLiteral("Accept"),
         QByteArrayLiteral("text/event-stream")
@@ -128,6 +149,11 @@ void LlmClient::sendRequest(
         request.temperature
     );
 
+    /*
+     * Local llama.cpp structured editing.
+     *
+     * GBNF is not sent together with the remote JSON Schema.
+     */
     if (!request.grammar.isEmpty()) {
 
         body.insert(
@@ -136,25 +162,38 @@ void LlmClient::sendRequest(
         );
     }
 
+    /*
+     * Remote OpenAI/OpenRouter structured output.
+     */
+    if (!request.responseFormat.isEmpty()) {
+
+        body.insert(
+            QStringLiteral("response_format"),
+            request.responseFormat
+        );
+    }
+
     m_streamBuffer.clear();
     m_currentSseData.clear();
 
     m_requestFailed =
-            false;
+        false;
 
     m_abortRequested =
-            false;
+        false;
 
     m_currentReply =
-            m_networkManager->post(
-                networkRequest,
-                QJsonDocument(body).toJson(
-                    QJsonDocument::Compact
-                )
-            );
+        m_networkManager->post(
+            networkRequest,
+            QJsonDocument(
+                body
+            ).toJson(
+                QJsonDocument::Compact
+            )
+        );
 
     QNetworkReply *reply =
-            m_currentReply;
+        m_currentReply;
 
     connect(
         reply,
@@ -192,26 +231,31 @@ void LlmClient::sendRequest(
             request.authType ==
                 AuthType::Bearer &&
             !request.apiKey.isEmpty()
-        );
+        )
+        << "hasGrammar="
+        << !request.grammar.isEmpty()
+        << "hasResponseFormat="
+        << !request.responseFormat.isEmpty();
 }
 
 
 void LlmClient::abortRequest()
 {
     QNetworkReply *reply =
-            m_currentReply;
+        m_currentReply;
 
     if (!reply) {
         return;
     }
 
     m_currentReply =
-            nullptr;
+        nullptr;
 
     m_abortRequested =
-            true;
+        true;
 
     reply->abort();
+
     reply->deleteLater();
 
     m_streamBuffer.clear();
@@ -282,6 +326,7 @@ void LlmClient::consumeStreamBuffer()
                 lineLength - 1
             ) == '\r'
         ) {
+
             lineLength--;
         }
 
@@ -306,6 +351,9 @@ void LlmClient::processSseLine(
     const QByteArray &line
 )
 {
+    /*
+     * Blank SSE line terminates an event.
+     */
     if (line.isEmpty()) {
 
         if (!m_currentSseData.isEmpty()) {
@@ -320,6 +368,9 @@ void LlmClient::processSseLine(
         return;
     }
 
+    /*
+     * SSE comments / keep-alive lines.
+     */
     if (line.startsWith(':')) {
         return;
     }
@@ -343,6 +394,7 @@ void LlmClient::processSseLine(
             );
 
         if (fieldValue.startsWith(' ')) {
+
             fieldValue.remove(
                 0,
                 1
@@ -358,6 +410,7 @@ void LlmClient::processSseLine(
     if (fieldName == "data") {
 
         if (!m_currentSseData.isEmpty()) {
+
             m_currentSseData.append(
                 '\n'
             );
@@ -464,6 +517,7 @@ QString LlmClient::buildReplyError(
 ) const
 {
     if (!reply) {
+
         return QStringLiteral(
             "LLM request failed."
         );
@@ -474,7 +528,7 @@ QString LlmClient::buildReplyError(
             QNetworkRequest::HttpStatusCodeAttribute
         ).toInt();
 
-    QByteArray body =
+    const QByteArray body =
         reply->readAll();
 
     QString message;
@@ -632,18 +686,17 @@ void LlmClient::onFinished()
         m_currentSseData.clear();
 
         m_abortRequested =
-                false;
+            false;
 
         m_requestFailed =
-                false;
+            false;
 
         return;
     }
 
     /*
-     * Any HTTP status outside the successful 2xx range is an
-     * application/provider error, regardless of QNetworkReply's
-     * network error value.
+     * HTTP errors need to be handled before the successful
+     * streaming path.
      */
     if (
         statusCode > 0 &&
@@ -654,7 +707,7 @@ void LlmClient::onFinished()
     ) {
 
         m_requestFailed =
-                true;
+            true;
 
         emit requestError(
             buildReplyError(
@@ -668,10 +721,10 @@ void LlmClient::onFinished()
         m_currentSseData.clear();
 
         m_abortRequested =
-                false;
+            false;
 
         m_requestFailed =
-                false;
+            false;
 
         return;
     }
@@ -682,8 +735,14 @@ void LlmClient::onFinished()
             QNetworkReply::NoError
     ) {
 
+        /*
+         * Process any final complete SSE lines.
+         */
         consumeStreamBuffer();
 
+        /*
+         * A final event may not have a trailing newline.
+         */
         if (!m_streamBuffer.isEmpty()) {
 
             QByteArray remaining =
@@ -692,7 +751,10 @@ void LlmClient::onFinished()
             m_streamBuffer.clear();
 
             if (remaining.endsWith('\r')) {
-                remaining.chop(1);
+
+                remaining.chop(
+                    1
+                );
             }
 
             processSseLine(
@@ -714,7 +776,7 @@ void LlmClient::onFinished()
     } else if (!m_requestFailed) {
 
         m_requestFailed =
-                true;
+            true;
 
         emit requestError(
             buildReplyError(
@@ -729,10 +791,10 @@ void LlmClient::onFinished()
     m_currentSseData.clear();
 
     m_abortRequested =
-            false;
+        false;
 
     m_requestFailed =
-            false;
+        false;
 }
 
 
@@ -765,15 +827,11 @@ void LlmClient::onError(
     }
 
     /*
-     * Don't emit immediately.
+     * Delay the actual error signal until onFinished().
      *
-     * onFinished() has the HTTP status and final response body,
-     * which lets us report much more useful messages such as:
-     *
-     *   LLM request failed (HTTP 401): Invalid API key
-     *
-     * rather than only a generic Qt network error.
+     * That gives us the HTTP status and provider response body,
+     * which is much more useful than only Qt's network error.
      */
     m_requestFailed =
-            true;
+        true;
 }

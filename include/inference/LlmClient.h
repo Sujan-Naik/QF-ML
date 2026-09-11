@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
@@ -19,22 +20,46 @@ public:
         QString url;
 
         AuthType authType =
-                AuthType::None;
+            AuthType::None;
 
         QString apiKey;
 
         QJsonArray messages;
 
         QString model =
-                QStringLiteral("local-model");
+            QStringLiteral("local-model");
 
         double temperature =
-                0.7;
+            0.7;
 
         int timeoutMs =
-                120000;
+            120000;
 
+        /*
+         * llama.cpp GBNF grammar.
+         *
+         * Used only by local inference.
+         */
         QString grammar;
+
+        /*
+         * OpenAI/OpenRouter-compatible structured output.
+         *
+         * This should contain the complete response_format object,
+         * e.g.:
+         *
+         * {
+         *   "type": "json_schema",
+         *   "json_schema": {
+         *     "name": "edit_plan",
+         *     "strict": true,
+         *     "schema": { ... }
+         *   }
+         * }
+         *
+         * Used only by remote inference.
+         */
+        QJsonObject responseFormat;
     };
 
     explicit LlmClient(
@@ -50,10 +75,10 @@ public:
 
     bool isActive() const;
 
-    signals:
-        void deltaReceived(
-            const QString &text
-        );
+signals:
+    void deltaReceived(
+        const QString &text
+    );
 
     void requestFinished();
 
@@ -86,23 +111,19 @@ private:
     ) const;
 
 private:
-    QNetworkAccessManager *m_networkManager{
-        nullptr
-    };
+    QNetworkAccessManager *m_networkManager =
+        nullptr;
 
-    QNetworkReply *m_currentReply{
-        nullptr
-    };
+    QNetworkReply *m_currentReply =
+        nullptr;
 
     QByteArray m_streamBuffer;
 
     QByteArray m_currentSseData;
 
-    bool m_requestFailed{
-        false
-    };
+    bool m_requestFailed =
+        false;
 
-    bool m_abortRequested{
-        false
-    };
+    bool m_abortRequested =
+        false;
 };
