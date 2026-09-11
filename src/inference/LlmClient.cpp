@@ -88,6 +88,7 @@ void LlmClient::sendRequest(
     }
 
     m_streamBuffer.clear();
+    m_currentSseData.clear();
     m_requestFailed = false;
     m_abortRequested = false;
 
@@ -144,6 +145,7 @@ void LlmClient::abortRequest()
     reply->deleteLater();
 
     m_streamBuffer.clear();
+    m_currentSseData.clear();
 
     qDebug()
         << "[LlmClient] Aborted reply="
@@ -161,11 +163,6 @@ void LlmClient::onReadyRead()
         qobject_cast<QNetworkReply *>(
             sender());
 
-    /*
-     * Only the currently active reply is allowed to
-     * feed the stream. An old aborted reply may still
-     * deliver queued signals.
-     */
     if (!reply ||
         reply != m_currentReply ||
         m_requestFailed ||
@@ -183,51 +180,98 @@ void LlmClient::onReadyRead()
     m_streamBuffer.append(
         data);
 
-    while (
-        m_streamBuffer.contains('\n')) {
+    consumeStreamBuffer();
+}
 
-        const int newlineIndex =
-            m_streamBuffer.indexOf(
-                '\n');
+void LlmClient::consumeStreamBuffer()
+{
+    while (true) {
+        int lineEndIndex =
+            m_streamBuffer.indexOf('\n');
+
+        if (lineEndIndex == -1) {
+            break;
+        }
+
+        int lineLength =
+            lineEndIndex;
+
+        if (lineLength > 0 &&
+            m_streamBuffer.at(lineLength - 1) == '\r') {
+            lineLength--;
+        }
 
         QByteArray line =
-            m_streamBuffer.left(
-                newlineIndex);
+            m_streamBuffer.left(lineLength);
 
         m_streamBuffer.remove(
             0,
-            newlineIndex + 1);
+            lineEndIndex + 1);
 
-        line =
-            line.trimmed();
-
-        if (line.isEmpty()) {
-            continue;
-        }
-
-        processLine(
-            line);
+        processSseLine(line);
     }
 }
 
-void LlmClient::processLine(
-    const QByteArray &rawLine)
+void LlmClient::processSseLine(
+    const QByteArray &line)
 {
-    QByteArray line =
-        rawLine.trimmed();
-
-    if (line.startsWith(
-            "data:")) {
-
-        line =
-            line.mid(5).trimmed();
-    }
-
     if (line.isEmpty()) {
+        if (!m_currentSseData.isEmpty()) {
+            dispatchSseMessage(
+                m_currentSseData);
+
+            m_currentSseData.clear();
+        }
+
         return;
     }
 
-    if (line == "[DONE]") {
+    if (line.startsWith(':')) {
+        return;
+    }
+
+    int colonIndex =
+        line.indexOf(':');
+
+    QByteArray fieldName;
+    QByteArray fieldValue;
+
+    if (colonIndex != -1) {
+        fieldName =
+            line.left(colonIndex);
+
+        fieldValue =
+            line.mid(colonIndex + 1);
+
+        if (fieldValue.startsWith(' ')) {
+            fieldValue.remove(0, 1);
+        }
+    } else {
+        fieldName =
+            line;
+    }
+
+    if (fieldName == "data") {
+        if (!m_currentSseData.isEmpty()) {
+            m_currentSseData.append('\n');
+        }
+
+        m_currentSseData.append(
+            fieldValue);
+    }
+}
+
+void LlmClient::dispatchSseMessage(
+    const QByteArray &rawPayload)
+{
+    QByteArray payload =
+        rawPayload.trimmed();
+
+    if (payload.isEmpty()) {
+        return;
+    }
+
+    if (payload == "[DONE]") {
         return;
     }
 
@@ -235,16 +279,16 @@ void LlmClient::processLine(
 
     const QJsonDocument document =
         QJsonDocument::fromJson(
-            line,
+            payload,
             &parseError);
 
     if (parseError.error !=
         QJsonParseError::NoError) {
 
         qWarning()
-            << "[LLM] Failed to parse stream JSON:"
+            << "[LLM] Failed to parse SSE JSON payload:"
             << parseError.errorString()
-            << line;
+            << payload;
 
         return;
     }
@@ -274,10 +318,17 @@ void LlmClient::processLine(
     const QJsonObject choice =
         choices.first().toObject();
 
-    const QJsonObject delta =
+    QJsonObject delta =
         choice.value(
             QStringLiteral("delta"))
             .toObject();
+
+    if (delta.isEmpty()) {
+        delta =
+            choice.value(
+                QStringLiteral("message"))
+                .toObject();
+    }
 
     const QString content =
         delta.value(
@@ -300,11 +351,6 @@ void LlmClient::onFinished()
         return;
     }
 
-    /*
-     * A previous request may still emit finished() after
-     * it was aborted. Never allow that stale signal to
-     * affect the current request.
-     */
     if (reply != m_currentReply) {
         qDebug()
             << "[LlmClient] Ignoring stale finished reply="
@@ -342,15 +388,27 @@ void LlmClient::onFinished()
         error ==
             QNetworkReply::NoError) {
 
+        consumeStreamBuffer();
+
         if (!m_streamBuffer.isEmpty()) {
+            QByteArray remaining =
+                m_streamBuffer;
 
-            const QByteArray remaining =
-                m_streamBuffer.trimmed();
+            m_streamBuffer.clear();
 
-            if (!remaining.isEmpty()) {
-                processLine(
-                    remaining);
+            if (remaining.endsWith('\r')) {
+                remaining.chop(1);
             }
+
+            processSseLine(
+                remaining);
+        }
+
+        if (!m_currentSseData.isEmpty()) {
+            dispatchSseMessage(
+                m_currentSseData);
+
+            m_currentSseData.clear();
         }
 
         emit requestFinished();
@@ -359,6 +417,7 @@ void LlmClient::onFinished()
     reply->deleteLater();
 
     m_streamBuffer.clear();
+    m_currentSseData.clear();
     m_abortRequested =
         false;
     m_requestFailed =
@@ -376,10 +435,6 @@ void LlmClient::onError(
         return;
     }
 
-    /*
-     * Ignore errors from an old request that was already
-     * replaced by a newer request.
-     */
     if (reply != m_currentReply) {
         qDebug()
             << "[LlmClient] Ignoring stale error reply="

@@ -1,9 +1,9 @@
 #pragma once
 
-#include <QObject>
 #include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QObject>
 #include <QString>
 
 class LlmClient : public QObject {
@@ -30,10 +30,10 @@ public:
 
     bool isActive() const;
 
-signals:
-    void deltaReceived(
-        const QString &text
-    );
+    signals:
+        void deltaReceived(
+            const QString &text
+        );
 
     void requestFinished();
 
@@ -51,8 +51,14 @@ private slots:
     );
 
 private:
-    void processLine(
+    void consumeStreamBuffer();
+
+    void processSseLine(
         const QByteArray &line
+    );
+
+    void dispatchSseMessage(
+        const QByteArray &rawPayload
     );
 
 private:
@@ -60,6 +66,7 @@ private:
     QNetworkReply *m_currentReply = nullptr;
 
     QByteArray m_streamBuffer;
+    QByteArray m_currentSseData;
 
     bool m_requestFailed = false;
     bool m_abortRequested = false;
