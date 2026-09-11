@@ -10,136 +10,206 @@
 
 LlmClient::LlmClient(
     QNetworkAccessManager *networkManager,
-    QObject *parent)
+    QObject *parent
+)
     : QObject(parent)
-    , m_networkManager(networkManager)
+    , m_networkManager(
+        networkManager
+    )
 {
 }
 
+
 void LlmClient::sendRequest(
-    const Request &request)
+    const Request &request
+)
 {
     abortRequest();
 
     if (!m_networkManager) {
+
         emit requestError(
             QStringLiteral(
-                "LLM network manager is unavailable."));
+                "LLM network manager is unavailable."
+            )
+        );
+
         return;
     }
 
     QUrl url(
-        request.url);
+        request.url
+    );
 
     if (url.scheme().isEmpty()) {
         url.setScheme(
-            QStringLiteral("http"));
+            QStringLiteral("http")
+        );
     }
 
-    if (!url.isValid()) {
+    if (!url.isValid() ||
+        url.isEmpty()) {
+
         emit requestError(
             QStringLiteral(
-                "Invalid LLM URL: %1")
-            .arg(
-                url.errorString()));
+                "Invalid LLM URL: %1"
+            ).arg(
+                url.errorString()
+            )
+        );
+
         return;
     }
 
     QNetworkRequest networkRequest(
-        url);
+        url
+    );
 
     networkRequest.setHeader(
         QNetworkRequest::ContentTypeHeader,
-        QStringLiteral("application/json"));
+        QStringLiteral(
+            "application/json"
+        )
+    );
+
+    networkRequest.setRawHeader(
+        QByteArrayLiteral("Accept"),
+        QByteArrayLiteral("text/event-stream")
+    );
 
     networkRequest.setHeader(
         QNetworkRequest::UserAgentHeader,
-        QStringLiteral("TalosApp/1.0"));
+        QStringLiteral(
+            "TalosApp/1.0"
+        )
+    );
 
     networkRequest.setAttribute(
         QNetworkRequest::RedirectPolicyAttribute,
-        QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkRequest::NoLessSafeRedirectPolicy
+    );
 
     networkRequest.setTransferTimeout(
-        request.timeoutMs);
+        request.timeoutMs
+    );
+
+    if (
+        request.authType ==
+            AuthType::Bearer &&
+        !request.apiKey.isEmpty()
+    ) {
+
+        networkRequest.setRawHeader(
+            QByteArrayLiteral("Authorization"),
+            QByteArrayLiteral("Bearer ") +
+            request.apiKey.toUtf8()
+        );
+    }
 
     QJsonObject body;
 
     body.insert(
         QStringLiteral("model"),
-        request.model);
+        request.model
+    );
 
     body.insert(
         QStringLiteral("messages"),
-        request.messages);
+        request.messages
+    );
 
     body.insert(
         QStringLiteral("stream"),
-        true);
+        true
+    );
 
     body.insert(
         QStringLiteral("temperature"),
-        request.temperature);
+        request.temperature
+    );
 
     if (!request.grammar.isEmpty()) {
+
         body.insert(
             QStringLiteral("grammar"),
-            request.grammar);
+            request.grammar
+        );
     }
 
     m_streamBuffer.clear();
     m_currentSseData.clear();
-    m_requestFailed = false;
-    m_abortRequested = false;
+
+    m_requestFailed =
+            false;
+
+    m_abortRequested =
+            false;
 
     m_currentReply =
-        m_networkManager->post(
-            networkRequest,
-            QJsonDocument(body).toJson(
-                QJsonDocument::Compact));
+            m_networkManager->post(
+                networkRequest,
+                QJsonDocument(body).toJson(
+                    QJsonDocument::Compact
+                )
+            );
 
     QNetworkReply *reply =
-        m_currentReply;
+            m_currentReply;
 
     connect(
         reply,
         &QNetworkReply::readyRead,
         this,
-        &LlmClient::onReadyRead);
+        &LlmClient::onReadyRead
+    );
 
     connect(
         reply,
         &QNetworkReply::finished,
         this,
-        &LlmClient::onFinished);
+        &LlmClient::onFinished
+    );
 
     connect(
         reply,
         QOverload<QNetworkReply::NetworkError>::of(
-            &QNetworkReply::errorOccurred),
+            &QNetworkReply::errorOccurred
+        ),
         this,
-        &LlmClient::onError);
+        &LlmClient::onError
+    );
 
     qDebug()
         << "[LlmClient] POST started"
         << "reply="
-        << reply;
+        << reply
+        << "url="
+        << url
+        << "model="
+        << request.model
+        << "authenticated="
+        << (
+            request.authType ==
+                AuthType::Bearer &&
+            !request.apiKey.isEmpty()
+        );
 }
+
 
 void LlmClient::abortRequest()
 {
     QNetworkReply *reply =
-        m_currentReply;
+            m_currentReply;
 
     if (!reply) {
         return;
     }
 
     m_currentReply =
-        nullptr;
+            nullptr;
 
     m_abortRequested =
-        true;
+            true;
 
     reply->abort();
     reply->deleteLater();
@@ -152,21 +222,26 @@ void LlmClient::abortRequest()
         << reply;
 }
 
+
 bool LlmClient::isActive() const
 {
     return m_currentReply != nullptr;
 }
 
+
 void LlmClient::onReadyRead()
 {
     auto *reply =
         qobject_cast<QNetworkReply *>(
-            sender());
+            sender()
+        );
 
-    if (!reply ||
+    if (
+        !reply ||
         reply != m_currentReply ||
         m_requestFailed ||
-        m_abortRequested) {
+        m_abortRequested
+    ) {
         return;
     }
 
@@ -178,16 +253,21 @@ void LlmClient::onReadyRead()
     }
 
     m_streamBuffer.append(
-        data);
+        data
+    );
 
     consumeStreamBuffer();
 }
 
+
 void LlmClient::consumeStreamBuffer()
 {
     while (true) {
-        int lineEndIndex =
-            m_streamBuffer.indexOf('\n');
+
+        const int lineEndIndex =
+            m_streamBuffer.indexOf(
+                '\n'
+            );
 
         if (lineEndIndex == -1) {
             break;
@@ -196,29 +276,43 @@ void LlmClient::consumeStreamBuffer()
         int lineLength =
             lineEndIndex;
 
-        if (lineLength > 0 &&
-            m_streamBuffer.at(lineLength - 1) == '\r') {
+        if (
+            lineLength > 0 &&
+            m_streamBuffer.at(
+                lineLength - 1
+            ) == '\r'
+        ) {
             lineLength--;
         }
 
-        QByteArray line =
-            m_streamBuffer.left(lineLength);
+        const QByteArray line =
+            m_streamBuffer.left(
+                lineLength
+            );
 
         m_streamBuffer.remove(
             0,
-            lineEndIndex + 1);
+            lineEndIndex + 1
+        );
 
-        processSseLine(line);
+        processSseLine(
+            line
+        );
     }
 }
 
+
 void LlmClient::processSseLine(
-    const QByteArray &line)
+    const QByteArray &line
+)
 {
     if (line.isEmpty()) {
+
         if (!m_currentSseData.isEmpty()) {
+
             dispatchSseMessage(
-                m_currentSseData);
+                m_currentSseData
+            );
 
             m_currentSseData.clear();
         }
@@ -230,41 +324,57 @@ void LlmClient::processSseLine(
         return;
     }
 
-    int colonIndex =
+    const int colonIndex =
         line.indexOf(':');
 
     QByteArray fieldName;
     QByteArray fieldValue;
 
     if (colonIndex != -1) {
+
         fieldName =
-            line.left(colonIndex);
+            line.left(
+                colonIndex
+            );
 
         fieldValue =
-            line.mid(colonIndex + 1);
+            line.mid(
+                colonIndex + 1
+            );
 
         if (fieldValue.startsWith(' ')) {
-            fieldValue.remove(0, 1);
+            fieldValue.remove(
+                0,
+                1
+            );
         }
+
     } else {
+
         fieldName =
             line;
     }
 
     if (fieldName == "data") {
+
         if (!m_currentSseData.isEmpty()) {
-            m_currentSseData.append('\n');
+            m_currentSseData.append(
+                '\n'
+            );
         }
 
         m_currentSseData.append(
-            fieldValue);
+            fieldValue
+        );
     }
 }
 
+
 void LlmClient::dispatchSseMessage(
-    const QByteArray &rawPayload)
+    const QByteArray &rawPayload
+)
 {
-    QByteArray payload =
+    const QByteArray payload =
         rawPayload.trimmed();
 
     if (payload.isEmpty()) {
@@ -280,10 +390,13 @@ void LlmClient::dispatchSseMessage(
     const QJsonDocument document =
         QJsonDocument::fromJson(
             payload,
-            &parseError);
+            &parseError
+        );
 
-    if (parseError.error !=
-        QJsonParseError::NoError) {
+    if (
+        parseError.error !=
+        QJsonParseError::NoError
+    ) {
 
         qWarning()
             << "[LLM] Failed to parse SSE JSON payload:"
@@ -302,7 +415,8 @@ void LlmClient::dispatchSseMessage(
 
     const QJsonValue choicesValue =
         root.value(
-            QStringLiteral("choices"));
+            QStringLiteral("choices")
+        );
 
     if (!choicesValue.isArray()) {
         return;
@@ -320,38 +434,158 @@ void LlmClient::dispatchSseMessage(
 
     QJsonObject delta =
         choice.value(
-            QStringLiteral("delta"))
-            .toObject();
+            QStringLiteral("delta")
+        ).toObject();
 
     if (delta.isEmpty()) {
+
         delta =
             choice.value(
-                QStringLiteral("message"))
-                .toObject();
+                QStringLiteral("message")
+            ).toObject();
     }
 
     const QString content =
         delta.value(
-            QStringLiteral("content"))
-            .toString();
+            QStringLiteral("content")
+        ).toString();
 
     if (!content.isEmpty()) {
+
         emit deltaReceived(
-            content);
+            content
+        );
     }
 }
+
+
+QString LlmClient::buildReplyError(
+    QNetworkReply *reply
+) const
+{
+    if (!reply) {
+        return QStringLiteral(
+            "LLM request failed."
+        );
+    }
+
+    const int statusCode =
+        reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute
+        ).toInt();
+
+    QByteArray body =
+        reply->readAll();
+
+    QString message;
+
+    QJsonParseError parseError;
+
+    const QJsonDocument document =
+        QJsonDocument::fromJson(
+            body,
+            &parseError
+        );
+
+    if (
+        parseError.error ==
+            QJsonParseError::NoError &&
+        document.isObject()
+    ) {
+
+        const QJsonObject root =
+            document.object();
+
+        const QJsonObject errorObject =
+            root.value(
+                QStringLiteral("error")
+            ).toObject();
+
+        if (!errorObject.isEmpty()) {
+
+            message =
+                errorObject.value(
+                    QStringLiteral("message")
+                ).toString();
+
+            if (message.isEmpty()) {
+
+                message =
+                    errorObject.value(
+                        QStringLiteral("detail")
+                    ).toString();
+            }
+        }
+
+        if (message.isEmpty()) {
+
+            message =
+                root.value(
+                    QStringLiteral("message")
+                ).toString();
+        }
+    }
+
+    if (message.isEmpty()) {
+
+        message =
+            QString::fromUtf8(
+                body
+            ).trimmed();
+    }
+
+    QString result =
+        QStringLiteral(
+            "LLM request failed"
+        );
+
+    if (statusCode > 0) {
+
+        result +=
+            QStringLiteral(
+                " (HTTP %1)"
+            ).arg(
+                statusCode
+            );
+    }
+
+    const QString networkError =
+        reply->errorString().trimmed();
+
+    if (!message.isEmpty()) {
+
+        result +=
+            QStringLiteral(
+                ": "
+            ) +
+            message;
+
+    } else if (!networkError.isEmpty()) {
+
+        result +=
+            QStringLiteral(
+                ": "
+            ) +
+            networkError;
+    }
+
+    return result;
+}
+
 
 void LlmClient::onFinished()
 {
     auto *reply =
         qobject_cast<QNetworkReply *>(
-            sender());
+            sender()
+        );
 
     if (!reply) {
         return;
     }
 
     if (reply != m_currentReply) {
+
         qDebug()
             << "[LlmClient] Ignoring stale finished reply="
             << reply;
@@ -373,6 +607,11 @@ void LlmClient::onFinished()
     const QNetworkReply::NetworkError error =
         reply->error();
 
+    const int statusCode =
+        reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute
+        ).toInt();
+
     qDebug()
         << "[LlmClient] Finished reply="
         << reply
@@ -381,16 +620,72 @@ void LlmClient::onFinished()
         << "failed="
         << failed
         << "error="
-        << error;
+        << error
+        << "httpStatus="
+        << statusCode;
 
-    if (!aborted &&
+    if (aborted) {
+
+        reply->deleteLater();
+
+        m_streamBuffer.clear();
+        m_currentSseData.clear();
+
+        m_abortRequested =
+                false;
+
+        m_requestFailed =
+                false;
+
+        return;
+    }
+
+    /*
+     * Any HTTP status outside the successful 2xx range is an
+     * application/provider error, regardless of QNetworkReply's
+     * network error value.
+     */
+    if (
+        statusCode > 0 &&
+        (
+            statusCode < 200 ||
+            statusCode >= 300
+        )
+    ) {
+
+        m_requestFailed =
+                true;
+
+        emit requestError(
+            buildReplyError(
+                reply
+            )
+        );
+
+        reply->deleteLater();
+
+        m_streamBuffer.clear();
+        m_currentSseData.clear();
+
+        m_abortRequested =
+                false;
+
+        m_requestFailed =
+                false;
+
+        return;
+    }
+
+    if (
         !failed &&
         error ==
-            QNetworkReply::NoError) {
+            QNetworkReply::NoError
+    ) {
 
         consumeStreamBuffer();
 
         if (!m_streamBuffer.isEmpty()) {
+
             QByteArray remaining =
                 m_streamBuffer;
 
@@ -401,41 +696,63 @@ void LlmClient::onFinished()
             }
 
             processSseLine(
-                remaining);
+                remaining
+            );
         }
 
         if (!m_currentSseData.isEmpty()) {
+
             dispatchSseMessage(
-                m_currentSseData);
+                m_currentSseData
+            );
 
             m_currentSseData.clear();
         }
 
         emit requestFinished();
+
+    } else if (!m_requestFailed) {
+
+        m_requestFailed =
+                true;
+
+        emit requestError(
+            buildReplyError(
+                reply
+            )
+        );
     }
 
     reply->deleteLater();
 
     m_streamBuffer.clear();
     m_currentSseData.clear();
+
     m_abortRequested =
-        false;
+            false;
+
     m_requestFailed =
-        false;
+            false;
 }
 
+
 void LlmClient::onError(
-    QNetworkReply::NetworkError error)
+    QNetworkReply::NetworkError error
+)
 {
+    Q_UNUSED(error)
+
     auto *reply =
         qobject_cast<QNetworkReply *>(
-            sender());
+            sender()
+        );
 
     if (!reply) {
         return;
     }
 
     if (reply != m_currentReply) {
+
         qDebug()
             << "[LlmClient] Ignoring stale error reply="
             << reply;
@@ -447,25 +764,16 @@ void LlmClient::onError(
         return;
     }
 
+    /*
+     * Don't emit immediately.
+     *
+     * onFinished() has the HTTP status and final response body,
+     * which lets us report much more useful messages such as:
+     *
+     *   LLM request failed (HTTP 401): Invalid API key
+     *
+     * rather than only a generic Qt network error.
+     */
     m_requestFailed =
-        true;
-
-    QString message =
-        QStringLiteral(
-            "LLM network error (%1)")
-        .arg(
-            static_cast<int>(
-                error));
-
-    const QString errorString =
-        reply->errorString();
-
-    if (!errorString.isEmpty()) {
-        message +=
-            QStringLiteral(": ") +
-            errorString;
-    }
-
-    emit requestError(
-        message);
+            true;
 }

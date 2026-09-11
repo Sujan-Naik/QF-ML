@@ -31,6 +31,56 @@ public:
 
     Q_ENUM(SttModel)
 
+    enum class LlmMode {
+        Local,
+        Remote
+    };
+
+    Q_ENUM(LlmMode)
+
+    enum class LlmAuthType {
+        None,
+        Bearer
+    };
+
+    Q_ENUM(LlmAuthType)
+
+    struct LlmConfig {
+        LlmMode mode =
+                LlmMode::Local;
+
+        /*
+         * Remote mode only.
+         *
+         * This should be the OpenAI-compatible chat completions
+         * endpoint, for example:
+         *
+         * https://openrouter.ai/api/v1/chat/completions
+         */
+        QString endpoint;
+
+        /*
+         * Remote model identifier, for example:
+         *
+         * z-ai/glm-5.3-flash
+         */
+        QString model;
+
+        /*
+         * Optional authentication.
+         *
+         * None:
+         *   No Authorization header is sent.
+         *
+         * Bearer:
+         *   Authorization: Bearer <apiKey>
+         */
+        LlmAuthType authType =
+                LlmAuthType::None;
+
+        QString apiKey;
+    };
+
 public:
     explicit InferenceService(
         QObject *parent = nullptr
@@ -38,6 +88,21 @@ public:
 
     ~InferenceService() override;
 
+    /*
+     * Backwards-compatible local-mode initialization.
+     *
+     * Existing applications can continue using:
+     *
+     * initialize(
+     *     LlamaManager::Backend::Vulkan,
+     *     sttModelPath
+     * );
+     *
+     * This always selects local LLM mode.
+     *
+     * New applications should prefer the overload that takes
+     * an explicit LlmConfig.
+     */
     bool initialize(
         LlamaManager::Backend llamaBackend =
                 LlamaManager::Backend::Vulkan,
@@ -46,6 +111,53 @@ public:
         SttModel sttModel =
                 SttModel::Nemotron35
     );
+
+    /*
+     * Explicit initialization.
+     *
+     * LlmConfig::Local:
+     *   Uses ModelManager + LlamaManager + Docker.
+     *
+     * LlmConfig::Remote:
+     *   Uses the supplied OpenAI-compatible endpoint and does
+     *   not start the local llama.cpp Docker server.
+     */
+    bool initialize(
+        LlamaManager::Backend llamaBackend,
+        const QString &sttModelPath,
+        SttModel sttModel,
+        const LlmConfig &llmConfig
+    );
+
+    // -------------------------------------------------------------------------
+    // LLM configuration
+    // -------------------------------------------------------------------------
+
+    /*
+     * Configure the LLM before or after initialization.
+     *
+     * Before initialization:
+     *   Configuration is stored and used by initialize().
+     *
+     * After initialization:
+     *   The active LLM is switched immediately.
+     *
+     * Remote mode:
+     *   Stops the local llama.cpp server if it is running.
+     *
+     * Local mode:
+     *   Stops any remote configuration and starts the selected
+     *   local model if one is available.
+     */
+    bool setLlmConfig(
+        const LlmConfig &config
+    );
+
+    LlmMode llmMode() const;
+
+    QString llmEndpoint() const;
+
+    QString llmModel() const;
 
     // -------------------------------------------------------------------------
     // Models
@@ -104,7 +216,7 @@ public:
         const QString &model = QString(),
         double temperature = 0.7,
         int timeoutMs = 120000,
-        const QString &grammar=QString()
+        const QString &grammar = QString()
     );
 
     void abortChatRequest();
@@ -187,6 +299,8 @@ signals:
 
     void llmReady();
 
+    void llmConfigurationChanged();
+
     void transcriptionFinished(
         const QString &text
     );
@@ -258,35 +372,80 @@ signals:
 
 private slots:
     void onLlmServerReady();
-    void onLlamaError(const QString &error);
+    void onLlamaError(
+        const QString &error
+    );
     void onTtsServerReady();
-    void onModelSelected(const QString &modelId);
+    void onModelSelected(
+        const QString &modelId
+    );
 
 private:
+    bool configureRemoteLlm();
+
+    bool validateLlmConfig(
+        const LlmConfig &config,
+        QString *error = nullptr
+    ) const;
+
     bool startSelectedLlmModel();
 
-    QString resolveSttModelFilename(SttModel model) const;
-    QString sttModelToString(SttModel model) const;
-    SttModel sttModelFromString(const QString &model) const;
-    int resolveSttGpu() const;
-    QString resolveSttModelPath(const QString &requestedPath) const;
+    QString resolveSttModelFilename(
+        SttModel model
+    ) const;
 
+    QString sttModelToString(
+        SttModel model
+    ) const;
+
+    SttModel sttModelFromString(
+        const QString &model
+    ) const;
+
+    int resolveSttGpu() const;
+
+    QString resolveSttModelPath(
+        const QString &requestedPath
+    ) const;
+
+private:
     std::unique_ptr<ModelManager> m_modelManager;
     std::unique_ptr<LlamaManager> m_llamaManager;
     std::unique_ptr<LlmClient> m_llmClient;
     std::unique_ptr<TtsManager> m_ttsManager;
     std::unique_ptr<ITranscriber> m_stt;
-    QNetworkAccessManager *m_networkManager{nullptr};
 
-    LlamaManager::Backend m_llamaBackend{LlamaManager::Backend::Vulkan};
-    SttModel m_sttModel{SttModel::Nemotron35};
+    QNetworkAccessManager *m_networkManager{
+        nullptr
+    };
+
+    LlamaManager::Backend m_llamaBackend{
+        LlamaManager::Backend::Vulkan
+    };
+
+    SttModel m_sttModel{
+        SttModel::Nemotron35
+    };
+
+    LlmConfig m_llmConfig;
 
     QString m_llmEndpoint;
     QString m_llmModel;
     QString m_sttModelPath;
 
-    bool m_initialized{false};
-    bool m_llmReady{false};
-    bool m_sttReady{false};
-    bool m_ttsReady{false};
+    bool m_initialized{
+        false
+    };
+
+    bool m_llmReady{
+        false
+    };
+
+    bool m_sttReady{
+        false
+    };
+
+    bool m_ttsReady{
+        false
+    };
 };

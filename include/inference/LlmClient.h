@@ -10,21 +10,41 @@ class LlmClient : public QObject {
     Q_OBJECT
 
 public:
+    enum class AuthType {
+        None,
+        Bearer
+    };
+
+    struct Request {
+        QString url;
+
+        AuthType authType =
+                AuthType::None;
+
+        QString apiKey;
+
+        QJsonArray messages;
+
+        QString model =
+                QStringLiteral("local-model");
+
+        double temperature =
+                0.7;
+
+        int timeoutMs =
+                120000;
+
+        QString grammar;
+    };
+
     explicit LlmClient(
         QNetworkAccessManager *networkManager,
         QObject *parent = nullptr
     );
 
-    struct Request {
-        QString url;
-        QJsonArray messages;
-        QString model = QStringLiteral("local-model");
-        double temperature = 0.7;
-        int timeoutMs = 120000;
-        QString grammar = QString();
-    };
-
-    void sendRequest(const Request &request);
+    void sendRequest(
+        const Request &request
+    );
 
     void abortRequest();
 
@@ -61,13 +81,28 @@ private:
         const QByteArray &rawPayload
     );
 
+    QString buildReplyError(
+        QNetworkReply *reply
+    ) const;
+
 private:
-    QNetworkAccessManager *m_networkManager = nullptr;
-    QNetworkReply *m_currentReply = nullptr;
+    QNetworkAccessManager *m_networkManager{
+        nullptr
+    };
+
+    QNetworkReply *m_currentReply{
+        nullptr
+    };
 
     QByteArray m_streamBuffer;
+
     QByteArray m_currentSseData;
 
-    bool m_requestFailed = false;
-    bool m_abortRequested = false;
+    bool m_requestFailed{
+        false
+    };
+
+    bool m_abortRequested{
+        false
+    };
 };
