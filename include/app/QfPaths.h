@@ -1,55 +1,39 @@
 #pragma once
 
-#include <QStandardPaths>
 #include <QDir>
+#include <QStandardPaths>
 
 namespace QFPaths {
 
 inline QString dataRoot() {
-    const QString base =
-        QStandardPaths::writableLocation(
-            QStandardPaths::GenericDataLocation
-        );
+  const QString base =
+      QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
 
-    return QDir(base).filePath(
-        QStringLiteral("QuestFarer")
-    );
+  return QDir(base).filePath(QStringLiteral("QuestFarer"));
 }
 
 inline QString qfmlRoot() {
-    return QDir(dataRoot()).filePath(
-        QStringLiteral("qf-ml")
-    );
+  return QDir(dataRoot()).filePath(QStringLiteral("qf-ml"));
 }
 
 inline QString modelsRoot() {
-    return QDir(qfmlRoot()).filePath(
-        QStringLiteral("models")
-    );
+  return QDir(qfmlRoot()).filePath(QStringLiteral("models"));
 }
 
 inline QString llmModelsDir() {
-    return QDir(modelsRoot()).filePath(
-        QStringLiteral("llm")
-    );
+  return QDir(modelsRoot()).filePath(QStringLiteral("llm"));
 }
 
 inline QString sttModelsDir() {
-    return QDir(modelsRoot()).filePath(
-        QStringLiteral("stt")
-    );
+  return QDir(modelsRoot()).filePath(QStringLiteral("stt"));
 }
 
 inline QString whisperModelsDir() {
-    return QDir(modelsRoot()).filePath(
-        QStringLiteral("whisper")
-    );
+  return QDir(modelsRoot()).filePath(QStringLiteral("whisper"));
 }
 
 inline QString wakewordModelsDir() {
-    return QDir(modelsRoot()).filePath(
-        QStringLiteral("wakeword")
-    );
+  return QDir(modelsRoot()).filePath(QStringLiteral("wakeword"));
 }
 
-}
+} // namespace QFPaths

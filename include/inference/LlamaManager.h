@@ -1,153 +1,130 @@
 #pragma once
 
+#include <QByteArray>
 #include <QNetworkAccessManager>
 #include <QProcess>
+#include <QString>
 #include <QTimer>
 #include <QUrl>
-#include <QByteArray>
-#include <QString>
 
 class LlamaManager final : public QObject {
-    Q_OBJECT
+  Q_OBJECT
 
 public:
-    enum class Backend {
-        Rocm,
-        Cuda,
-        Vulkan,
-        Intel,
-        Cpu
-    };
+  enum class Backend { Rocm, Cuda, Vulkan, Intel, Cpu };
 
-    Q_ENUM(Backend)
+  Q_ENUM(Backend)
 
-    explicit LlamaManager(QObject *parent = nullptr);
+  explicit LlamaManager(QObject *parent = nullptr);
 
-    ~LlamaManager() override;
+  ~LlamaManager() override;
 
-    bool initialize(
-        const QString &modelPath,
-        Backend backend,
-        bool autoStart = true
-    );
+  bool initialize(const QString &modelPath, Backend backend,
+                  bool autoStart = true);
 
-    bool configure(
-        const QString &modelPath,
-        Backend backend
-    );
+  bool configure(const QString &modelPath, Backend backend);
 
-    void setEnabled(bool enabled);
+  void setEnabled(bool enabled);
 
-    bool isEnabled() const;
+  bool isEnabled() const;
 
-    bool isRunning() const;
+  bool isRunning() const;
 
-    bool isReady() const;
+  bool isReady() const;
 
-    QUrl serverUrl() const;
+  QUrl serverUrl() const;
 
-    QString modelPath() const;
+  QString modelPath() const;
 
-    Backend backend() const;
+  Backend backend() const;
 
-    void start();
+  void start();
 
-    void stop();
+  void stop();
 
 signals:
-    void serverStarting();
+  void serverStarting();
 
-    void serverReady();
+  void serverReady();
 
-    void serverStopped();
+  void serverStopped();
 
-    void statusChanged();
+  void statusChanged();
 
-    void errorOccurred(
-        const QString &error
-    );
+  void errorOccurred(const QString &error);
 
 private slots:
-    void checkServerHealth();
+  void checkServerHealth();
 
-    void onDockerPullFinished(
-        int exitCode,
-        QProcess::ExitStatus status
-    );
+  void onDockerPullFinished(int exitCode, QProcess::ExitStatus status);
 
-    void onDockerRunFinished(
-        int exitCode,
-        QProcess::ExitStatus status
-    );
+  void onDockerRunFinished(int exitCode, QProcess::ExitStatus status);
 
-    void onDockerOutputReady();
+  void onDockerOutputReady();
 
-    void onDockerErrorReady();
+  void onDockerErrorReady();
 
 private:
-    bool checkDockerAvailable();
+  bool checkDockerAvailable();
 
-    QString dockerImage() const;
+  QString dockerImage() const;
 
-    QStringList dockerRunArguments() const;
+  QStringList dockerRunArguments() const;
 
-    void startDockerContainer();
+  void startDockerContainer();
 
-    void pullDockerImage();
+  void pullDockerImage();
 
-    void runDockerContainer();
+  void runDockerContainer();
 
-    void stopDockerContainer();
+  void stopDockerContainer();
 
 private:
-    static constexpr int HOST_PORT = 8081;
-    static constexpr int CONTAINER_PORT = 8081;
-    static constexpr int MAX_HEALTH_ATTEMPTS = 60;
+  static constexpr int HOST_PORT = 8081;
+  static constexpr int CONTAINER_PORT = 8081;
+  static constexpr int MAX_HEALTH_ATTEMPTS = 60;
 
-    static constexpr const char *CONTAINER_NAME =
-            "talos-llama";
+  static constexpr const char *CONTAINER_NAME = "talos-llama";
 
-    /*
-     * These should match the images you already use.
-     */
-    static constexpr const char *ROCM_IMAGE =
-            "ghcr.io/ggml-org/llama.cpp:server-rocm";
+  /*
+   * These should match the images you already use.
+   */
+  static constexpr const char *ROCM_IMAGE =
+      "ghcr.io/ggml-org/llama.cpp:server-rocm";
 
-    static constexpr const char *CUDA_IMAGE =
-            "ghcr.io/ggml-org/llama.cpp:server-cuda";
+  static constexpr const char *CUDA_IMAGE =
+      "ghcr.io/ggml-org/llama.cpp:server-cuda";
 
-    static constexpr const char *VULKAN_IMAGE =
-            "ghcr.io/ggml-org/llama.cpp:server-vulkan";
+  static constexpr const char *VULKAN_IMAGE =
+      "ghcr.io/ggml-org/llama.cpp:server-vulkan";
 
-    static constexpr const char *INTEL_IMAGE =
-            "ghcr.io/ggml-org/llama.cpp:server";
+  static constexpr const char *INTEL_IMAGE =
+      "ghcr.io/ggml-org/llama.cpp:server";
 
-    static constexpr const char *CPU_IMAGE =
-            "ghcr.io/ggml-org/llama.cpp:server";
+  static constexpr const char *CPU_IMAGE = "ghcr.io/ggml-org/llama.cpp:server";
 
-    QNetworkAccessManager *m_networkManager = nullptr;
-    QTimer *m_healthCheckTimer = nullptr;
-    QProcess *m_dockerProcess = nullptr;
+  QNetworkAccessManager *m_networkManager = nullptr;
+  QTimer *m_healthCheckTimer = nullptr;
+  QProcess *m_dockerProcess = nullptr;
 
-    /*
-     * Docker output must be buffered because
-     * readyReadStandardOutput() consumes the bytes.
-     */
-    QByteArray m_dockerStdout;
-    QByteArray m_dockerStderr;
+  /*
+   * Docker output must be buffered because
+   * readyReadStandardOutput() consumes the bytes.
+   */
+  QByteArray m_dockerStdout;
+  QByteArray m_dockerStderr;
 
-    QString m_modelPath;
-    QString m_containerId;
+  QString m_modelPath;
+  QString m_containerId;
 
-    QUrl m_serverUrl;
+  QUrl m_serverUrl;
 
-    Backend m_backend =
-            Backend::Cpu;
+  Backend m_backend = Backend::Cpu;
 
-    bool m_initialized = false;
-    bool m_enabled = true;
-    bool m_containerStarted = false;
-    bool m_ready = false;
+  bool m_initialized = false;
+  bool m_enabled = true;
+  bool m_containerStarted = false;
+  bool m_ready = false;
 
-    int m_healthAttempts = 0;
+  int m_healthAttempts = 0;
 };

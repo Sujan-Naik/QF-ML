@@ -3,10 +3,8 @@
 #include <QDialog>
 
 class QuantizationGuideDialog : public QDialog {
-    Q_OBJECT
+  Q_OBJECT
 
 public:
-    explicit QuantizationGuideDialog(
-        QWidget *parent = nullptr
-    );
+  explicit QuantizationGuideDialog(QWidget *parent = nullptr);
 };

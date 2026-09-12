@@ -5,11 +5,9 @@
 
 class ITranscriber {
 public:
-    virtual ~ITranscriber() = default;
+  virtual ~ITranscriber() = default;
 
-    virtual bool isLoaded() const = 0;
+  virtual bool isLoaded() const = 0;
 
-    virtual QString transcribe(
-        const std::vector<float> &pcm32f
-    ) = 0;
+  virtual QString transcribe(const std::vector<float> &pcm32f) = 0;
 };

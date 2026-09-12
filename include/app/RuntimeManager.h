@@ -3,32 +3,30 @@
 
 #include <QObject>
 
-#include <memory>
 #include <QtCore/qtmetamacros.h>
+#include <memory>
 
 class LlamaManager;
 class TtsManager;
 
 class RuntimeManager : public QObject {
-    Q_OBJECT
+  Q_OBJECT
 
 public:
-    explicit RuntimeManager(QObject *parent = nullptr);
+  explicit RuntimeManager(QObject *parent = nullptr);
 
-    ~RuntimeManager() override;
+  ~RuntimeManager() override;
 
-    LlamaManager *llama() const;
+  LlamaManager *llama() const;
 
-    TtsManager *tts() const;
+  TtsManager *tts() const;
 
 signals:
-    void runtimeError(
-        const QString &error
-    );
+  void runtimeError(const QString &error);
 
 private:
-    std::unique_ptr<LlamaManager> m_llamaManager;
-    std::unique_ptr<TtsManager> m_ttsManager;
+  std::unique_ptr<LlamaManager> m_llamaManager;
+  std::unique_ptr<TtsManager> m_ttsManager;
 };
 
 #endif // RUNTIMEMANAGER_H

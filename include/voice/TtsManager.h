@@ -1,13 +1,13 @@
 #ifndef TTSMANAGER_H
 #define TTSMANAGER_H
 
-#include <QObject>
 #include <QAudioSink>
 #include <QBuffer>
 #include <QDateTime>
 #include <QMutex>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QObject>
 #include <QProcess>
 #include <QQueue>
 #include <QStringList>
@@ -17,175 +17,140 @@
 #include <memory>
 
 struct AudioChunk {
-    QByteArray data;
-    int sampleRate = 24000;
-    int speakerId = 0;
-    qint64 timestamp = 0;
+  QByteArray data;
+  int sampleRate = 24000;
+  int speakerId = 0;
+  qint64 timestamp = 0;
 };
 
 class TtsManager : public QObject {
-    Q_OBJECT
+  Q_OBJECT
 
 public:
-    explicit TtsManager(QObject *parent = nullptr);
+  explicit TtsManager(QObject *parent = nullptr);
 
-    ~TtsManager() override;
+  ~TtsManager() override;
 
-    bool initialize(
-        const QString &serverUrl = QString(),
-        bool autoStart = true
-    );
+  bool initialize(const QString &serverUrl = QString(), bool autoStart = true);
 
-    void setEnabled(bool enabled);
+  void setEnabled(bool enabled);
 
-    [[nodiscard]] bool isEnabled() const {
-        return m_enabled;
-    }
+  [[nodiscard]] bool isEnabled() const { return m_enabled; }
 
-    void enqueueSentence(
-        const QString &sentence,
-        int speakerId = 0
-    );
+  void enqueueSentence(const QString &sentence, int speakerId = 0);
 
-    void stopAndClear();
+  void stopAndClear();
 
-    int queueSize() const;
+  int queueSize() const;
 
-    void setVoice(
-        const QString &voice
-    );
+  void setVoice(const QString &voice);
 
-    QString voice() const;
+  QString voice() const;
 
-    QStringList availableVoices() const;
+  QStringList availableVoices() const;
 
-    void refreshVoices();
+  void refreshVoices();
 
-    void stopDockerContainer();
+  void stopDockerContainer();
 
 signals:
-    void sentenceQueued(int speakerId);
+  void sentenceQueued(int speakerId);
 
-    void sentenceFinished();
+  void sentenceFinished();
 
-    void errorOccurred(
-        const QString &error
-    );
+  void errorOccurred(const QString &error);
 
-    void serverReady();
+  void serverReady();
 
-    void voiceChanged(
-        const QString &voice
-    );
+  void voiceChanged(const QString &voice);
 
-    void voicesChanged(
-        const QStringList &voices
-    );
+  void voicesChanged(const QStringList &voices);
 
 private slots:
-    void playNextInQueue();
+  void playNextInQueue();
 
-    void onAudioStateChanged(
-        QAudio::State state
-    );
+  void onAudioStateChanged(QAudio::State state);
 
+  void onDockerPullFinished(int exitCode, QProcess::ExitStatus status);
 
-    void onDockerPullFinished(
-        int exitCode,
-        QProcess::ExitStatus status
-    );
+  void onDockerRunFinished(int exitCode, QProcess::ExitStatus status);
 
-    void onDockerRunFinished(
-        int exitCode,
-        QProcess::ExitStatus status
-    );
+  void onDockerOutputReady();
 
-    void onDockerOutputReady();
+  void onDockerErrorReady();
 
-    void onDockerErrorReady();
-
-    void checkServerHealth();
+  void checkServerHealth();
 
 private:
-    void requestSynthesis(
-        const QString &text,
-        int speakerId,
-        quint64 generation
-    );
+  void requestSynthesis(const QString &text, int speakerId, quint64 generation);
 
-    void processReply(
-        QNetworkReply *reply,
-        quint64 generation,
-        int speakerId
-    );
+  void processReply(QNetworkReply *reply, quint64 generation, int speakerId);
 
-    void finishCurrentPlayback();
+  void finishCurrentPlayback();
 
-    void cleanupAudioSink();
+  void cleanupAudioSink();
 
-    bool checkDockerAvailable();
+  bool checkDockerAvailable();
 
-    void startDockerContainer();
+  void startDockerContainer();
 
-    void pullDockerImage();
+  void pullDockerImage();
 
-    void runDockerContainer();
+  void runDockerContainer();
 
-    static QStringList defaultVoices();
+  static QStringList defaultVoices();
 
 private:
-    QNetworkAccessManager *m_networkManager = nullptr;
+  QNetworkAccessManager *m_networkManager = nullptr;
 
-    QUrl m_serverUrl;
+  QUrl m_serverUrl;
 
-    QNetworkReply *m_currentReply = nullptr;
-    QNetworkReply *m_voiceReply = nullptr;
+  QNetworkReply *m_currentReply = nullptr;
+  QNetworkReply *m_voiceReply = nullptr;
 
-    std::unique_ptr<QAudioSink> m_audioSink;
+  std::unique_ptr<QAudioSink> m_audioSink;
 
-    QBuffer m_audioBuffer;
+  QBuffer m_audioBuffer;
 
-    QMutex m_audioBufferMutex;
+  QMutex m_audioBufferMutex;
 
-    QQueue<AudioChunk> m_audioQueue;
+  QQueue<AudioChunk> m_audioQueue;
 
-    mutable QMutex m_queueMutex;
+  mutable QMutex m_queueMutex;
 
-    bool m_enabled = false;
-    bool m_initialized = false;
+  bool m_enabled = false;
+  bool m_initialized = false;
 
-    bool m_isPlaying = false;
-    bool m_playbackCompletionPending = false;
+  bool m_isPlaying = false;
+  bool m_playbackCompletionPending = false;
 
-    bool m_synthesisInProgress = false;
+  bool m_synthesisInProgress = false;
 
-    quint64 m_generation = 0;
+  quint64 m_generation = 0;
 
-    QString m_voice =
-            QStringLiteral("af_bella");
+  QString m_voice = QStringLiteral("af_bella");
 
-    QStringList m_availableVoices;
+  QStringList m_availableVoices;
 
-    QProcess *m_dockerProcess = nullptr;
+  QProcess *m_dockerProcess = nullptr;
 
-    bool m_containerStarted = false;
+  bool m_containerStarted = false;
 
-    QString m_containerId;
+  QString m_containerId;
 
-    QTimer *m_healthCheckTimer = nullptr;
+  QTimer *m_healthCheckTimer = nullptr;
 
-    int m_healthAttempts = 0;
+  int m_healthAttempts = 0;
 
-    static constexpr const char *DOCKER_IMAGE =
-            "ghcr.io/remsky/kokoro-fastapi-rocm:latest";
+  static constexpr const char *DOCKER_IMAGE =
+      "ghcr.io/remsky/kokoro-fastapi-rocm:latest";
 
-    static constexpr int HOST_PORT = 8880;
-    static constexpr int CONTAINER_PORT = 8880;
+  static constexpr int HOST_PORT = 8880;
+  static constexpr int CONTAINER_PORT = 8880;
 
-    static constexpr const char *GFX_VERSION =
-            "10.3.0";
+  static constexpr const char *GFX_VERSION = "10.3.0";
 
-    static constexpr int MAX_HEALTH_ATTEMPTS = 60;
+  static constexpr int MAX_HEALTH_ATTEMPTS = 60;
 };
 
 #endif // TTSMANAGER_H

@@ -5,67 +5,38 @@
 #include <QTextBrowser>
 #include <QVBoxLayout>
 
-
-QuantizationGuideDialog::QuantizationGuideDialog(
-    QWidget *parent
-)
+QuantizationGuideDialog::QuantizationGuideDialog(QWidget *parent)
     : QDialog(parent) {
-    setWindowTitle(
-        QStringLiteral(
-            "Talos — Quantization Guide"
-        )
-    );
+  setWindowTitle(QStringLiteral("Talos — Quantization Guide"));
 
-    resize(
-        900,
-        760
-    );
+  resize(900, 760);
 
-    auto *layout =
-            new QVBoxLayout(
-                this
-            );
+  auto *layout = new QVBoxLayout(this);
 
-    auto *intro =
-            new QLabel(
-                this
-            );
+  auto *intro = new QLabel(this);
 
-    intro->setWordWrap(
-        true
-    );
+  intro->setWordWrap(true);
 
-    intro->setText(
-        QStringLiteral(
-            "<b>What is quantization?</b><br>"
-            "<br>"
-            "Quantization stores model weights using fewer bits than "
-            "full-precision formats. Lower-bit formats use less storage "
-            "and usually require less VRAM, but can reduce model quality. "
-            "Higher-bit formats generally preserve more of the original "
-            "model quality at the cost of memory.<br><br>"
-            "The names below are llama.cpp's technical quantization names. "
-            "They are useful when choosing a GGUF, but you normally do not "
-            "need to memorize them."
-        )
-    );
+  intro->setText(QStringLiteral(
+      "<b>What is quantization?</b><br>"
+      "<br>"
+      "Quantization stores model weights using fewer bits than "
+      "full-precision formats. Lower-bit formats use less storage "
+      "and usually require less VRAM, but can reduce model quality. "
+      "Higher-bit formats generally preserve more of the original "
+      "model quality at the cost of memory.<br><br>"
+      "The names below are llama.cpp's technical quantization names. "
+      "They are useful when choosing a GGUF, but you normally do not "
+      "need to memorize them."));
 
-    layout->addWidget(
-        intro
-    );
+  layout->addWidget(intro);
 
-    auto *browser =
-            new QTextBrowser(
-                this
-            );
+  auto *browser = new QTextBrowser(this);
 
-    browser->setOpenExternalLinks(
-        false
-    );
+  browser->setOpenExternalLinks(false);
 
-    browser->setHtml(
-        QStringLiteral(
-            R"(
+  browser->setHtml(QStringLiteral(
+      R"(
 <style>
 body {
     font-family: sans-serif;
@@ -437,29 +408,13 @@ llama.cpp quantization/type definitions. Actual runtime memory usage can
 be higher than the raw model size because of KV cache, context length,
 batching and backend/runtime buffers.
 </p>
-)"
-        )
-    );
+)"));
 
-    layout->addWidget(
-        browser,
-        1
-    );
+  layout->addWidget(browser, 1);
 
-    auto *buttons =
-            new QDialogButtonBox(
-                QDialogButtonBox::Close,
-                this
-            );
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
 
-    connect(
-        buttons,
-        &QDialogButtonBox::rejected,
-        this,
-        &QDialog::reject
-    );
+  connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    layout->addWidget(
-        buttons
-    );
+  layout->addWidget(buttons);
 }
