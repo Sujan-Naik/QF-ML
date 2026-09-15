@@ -1,521 +1,894 @@
-#include "../../include/inference/LlmClient.h"
+#include "../../include/inference/InferenceService.h"
 
+#include "../include/inference/LlmClient.h"
+#include "../include/voice/NemoTranscriber.h"
+#include "../include/voice/TtsManager.h"
+
+#include <QCoreApplication>
 #include <QDebug>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QNetworkReply>
-#include <QNetworkRequest>
+#include <QDir>
+#include <QFileInfo>
+#include <QNetworkAccessManager>
+#include <QNetworkProxy>
 #include <QUrl>
 
-LlmClient::LlmClient(QNetworkAccessManager *networkManager, QObject *parent)
-    : QObject(parent), m_networkManager(networkManager) {}
+#include "app/QfPaths.h"
+#include "inference/LlamaManager.h"
+#include "inference/ModelManager.h"
 
-void LlmClient::sendRequest(const Request &request) {
-  abortRequest();
+InferenceService::InferenceService(QObject *parent)
+    : QObject(parent), m_modelManager(std::make_unique<ModelManager>(this)),
+      m_llamaManager(std::make_unique<LlamaManager>(this)),
+      m_ttsManager(std::make_unique<TtsManager>(this)),
+      m_networkManager(new QNetworkAccessManager(this)) {
+  m_modelManager->setStorageDirectory(QFPaths::modelsRoot());
 
-  if (!m_networkManager) {
+  m_networkManager->setProxy(QNetworkProxy::NoProxy);
 
-    emit requestError(QStringLiteral("LLM network manager is unavailable."));
+  m_llmClient = std::make_unique<LlmClient>(m_networkManager, this);
 
-    return;
-  }
+  connect(m_llmClient.get(), &LlmClient::deltaReceived, this,
+          &InferenceService::llmDelta);
 
-  QUrl url(request.url);
+  connect(m_llmClient.get(), &LlmClient::requestFinished, this,
+          &InferenceService::llmFinished);
 
-  if (url.scheme().isEmpty()) {
+  connect(m_llmClient.get(), &LlmClient::toolCallsReceived, this,
+          &InferenceService::llmToolCalls);
 
-    url.setScheme(QStringLiteral("http"));
-  }
+  connect(m_llmClient.get(), &LlmClient::requestError, this,
+          [this](const QString &error) {
+            emit llmError(error);
 
-  if (!url.isValid() || url.isEmpty()) {
+            emit serviceError(error);
+          });
 
-    emit requestError(
-        QStringLiteral("Invalid LLM URL: %1").arg(url.errorString()));
+  connect(m_llamaManager.get(), &LlamaManager::serverReady, this,
+          &InferenceService::onLlmServerReady);
 
-    return;
-  }
+  connect(m_llamaManager.get(), &LlamaManager::errorOccurred, this,
+          &InferenceService::onLlamaError);
 
-  if (url.host().isEmpty()) {
+  connect(m_modelManager.get(), &ModelManager::remoteModelsChanged, this,
+          &InferenceService::remoteLlmModelsChanged);
 
-    emit requestError(
-        QStringLiteral("LLM URL has no host: %1").arg(request.url));
+  connect(m_modelManager.get(), &ModelManager::remoteVariantsChanged, this,
+          &InferenceService::remoteLlmVariantsChanged);
 
-    return;
-  }
+  connect(m_modelManager.get(), &ModelManager::storageDirectoryChanged, this,
+          &InferenceService::modelDirectoryChanged);
 
-  QNetworkRequest networkRequest(url);
+  connect(m_modelManager.get(), &ModelManager::selectedModelChanged, this,
+          &InferenceService::onModelSelected);
 
-  networkRequest.setHeader(QNetworkRequest::ContentTypeHeader,
-                           QStringLiteral("application/json"));
+  connect(m_modelManager.get(), &ModelManager::downloadStarted, this,
+          &InferenceService::modelDownloadStarted);
 
-  /*
-   * OpenAI-compatible chat-completions endpoints stream
-   * Server-Sent Events.
-   */
-  networkRequest.setRawHeader(QByteArrayLiteral("Accept"),
-                              QByteArrayLiteral("text/event-stream"));
+  connect(m_modelManager.get(), &ModelManager::downloadProgress, this,
+          &InferenceService::modelDownloadProgress);
 
-  networkRequest.setHeader(QNetworkRequest::UserAgentHeader,
-                           QStringLiteral("TalosApp/1.0"));
+  connect(m_modelManager.get(), &ModelManager::downloadFinished, this,
+          &InferenceService::modelDownloadFinished);
 
-  networkRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                              QNetworkRequest::NoLessSafeRedirectPolicy);
+  connect(m_modelManager.get(), &ModelManager::downloadError, this,
+          &InferenceService::modelDownloadError);
 
-  networkRequest.setTransferTimeout(request.timeoutMs);
+  connect(m_ttsManager.get(), &TtsManager::serverReady, this,
+          &InferenceService::onTtsServerReady);
 
-  if (request.authType == AuthType::Bearer && !request.apiKey.isEmpty()) {
+  connect(m_ttsManager.get(), &TtsManager::sentenceFinished, this,
+          &InferenceService::ttsSentenceFinished);
 
-    networkRequest.setRawHeader(QByteArrayLiteral("Authorization"),
-                                QByteArrayLiteral("Bearer ") +
-                                    request.apiKey.toUtf8());
-  }
+  connect(m_ttsManager.get(), &TtsManager::errorOccurred, this,
+          [this](const QString &error) {
+            emit ttsError(error);
 
-  QJsonObject body;
+            emit serviceError(error);
+          });
 
-  body.insert(QStringLiteral("model"), request.model);
+  connect(m_ttsManager.get(), &TtsManager::voiceChanged, this,
+          &InferenceService::ttsVoiceChanged);
 
-  body.insert(QStringLiteral("messages"), request.messages);
-
-  body.insert(QStringLiteral("stream"), true);
-
-  body.insert(QStringLiteral("temperature"), request.temperature);
-
-  /*
-   * Local llama.cpp structured editing.
-   *
-   * GBNF is not sent together with the remote JSON Schema.
-   */
-  if (!request.grammar.isEmpty()) {
-
-    body.insert(QStringLiteral("grammar"), request.grammar);
-  }
-
-  /*
-   * Remote OpenAI/OpenRouter structured output.
-   */
-  if (!request.responseFormat.isEmpty()) {
-
-    body.insert(QStringLiteral("response_format"), request.responseFormat);
-  }
-
-  m_streamBuffer.clear();
-  m_currentSseData.clear();
-
-  m_requestFailed = false;
-
-  m_abortRequested = false;
-
-  m_currentReply = m_networkManager->post(
-      networkRequest, QJsonDocument(body).toJson(QJsonDocument::Compact));
-
-  QNetworkReply *reply = m_currentReply;
-
-  connect(reply, &QNetworkReply::readyRead, this, &LlmClient::onReadyRead);
-
-  connect(reply, &QNetworkReply::finished, this, &LlmClient::onFinished);
-
-  connect(
-      reply,
-      QOverload<QNetworkReply::NetworkError>::of(&QNetworkReply::errorOccurred),
-      this, &LlmClient::onError);
-
-  qDebug() << "[LlmClient] POST started"
-           << "reply=" << reply << "url=" << url << "model=" << request.model
-           << "authenticated="
-           << (request.authType == AuthType::Bearer &&
-               !request.apiKey.isEmpty())
-           << "hasGrammar=" << !request.grammar.isEmpty()
-           << "hasResponseFormat=" << !request.responseFormat.isEmpty();
+  connect(m_ttsManager.get(), &TtsManager::voicesChanged, this,
+          &InferenceService::ttsVoicesChanged);
 }
 
-void LlmClient::abortRequest() {
-  QNetworkReply *reply = m_currentReply;
+InferenceService::~InferenceService() = default;
 
-  if (!reply) {
-    return;
-  }
+bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
+                                  const QString &sttModelPath,
+                                  SttModel sttModel) {
+  LlmConfig localConfig;
 
-  m_currentReply = nullptr;
+  localConfig.mode = LlmMode::Local;
 
-  m_abortRequested = true;
-
-  reply->abort();
-
-  reply->deleteLater();
-
-  m_streamBuffer.clear();
-  m_currentSseData.clear();
-
-  qDebug() << "[LlmClient] Aborted reply=" << reply;
+  return initialize(llamaBackend, sttModelPath, sttModel, localConfig);
 }
 
-bool LlmClient::isActive() const { return m_currentReply != nullptr; }
+bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
+                                  const QString &sttModelPath,
+                                  SttModel sttModel,
+                                  const LlmConfig &llmConfig) {
+  if (m_initialized)
+    return true;
 
-void LlmClient::onReadyRead() {
-  auto *reply = qobject_cast<QNetworkReply *>(sender());
+  QString configError;
 
-  if (!reply || reply != m_currentReply || m_requestFailed ||
-      m_abortRequested) {
-    return;
+  if (!validateLlmConfig(llmConfig, &configError)) {
+    emit serviceError(configError);
+
+    return false;
   }
 
-  const QByteArray data = reply->readAll();
+  m_llamaBackend = llamaBackend;
 
-  if (data.isEmpty()) {
-    return;
-  }
+  m_sttModel = sttModel;
 
-  m_streamBuffer.append(data);
+  m_llmConfig = llmConfig;
 
-  consumeStreamBuffer();
-}
+  qDebug() << "[InferenceService] initialize"
+           << "llamaBackend=" << static_cast<int>(m_llamaBackend)
+           << "sttModel=" << sttModelToString(m_sttModel)
+           << "llmMode=" << static_cast<int>(m_llmConfig.mode);
 
-void LlmClient::consumeStreamBuffer() {
-  while (true) {
-
-    const int lineEndIndex = m_streamBuffer.indexOf('\n');
-
-    if (lineEndIndex == -1) {
-      break;
+  if (m_llmConfig.mode == LlmMode::Remote) {
+    if (!configureRemoteLlm()) {
+      return false;
     }
-
-    int lineLength = lineEndIndex;
-
-    if (lineLength > 0 && m_streamBuffer.at(lineLength - 1) == '\r') {
-
-      lineLength--;
-    }
-
-    const QByteArray line = m_streamBuffer.left(lineLength);
-
-    m_streamBuffer.remove(0, lineEndIndex + 1);
-
-    processSseLine(line);
-  }
-}
-
-void LlmClient::processSseLine(const QByteArray &line) {
-  /*
-   * Blank SSE line terminates an event.
-   */
-  if (line.isEmpty()) {
-
-    if (!m_currentSseData.isEmpty()) {
-
-      dispatchSseMessage(m_currentSseData);
-
-      m_currentSseData.clear();
-    }
-
-    return;
-  }
-
-  /*
-   * SSE comments / keep-alive lines.
-   */
-  if (line.startsWith(':')) {
-    return;
-  }
-
-  const int colonIndex = line.indexOf(':');
-
-  QByteArray fieldName;
-  QByteArray fieldValue;
-
-  if (colonIndex != -1) {
-
-    fieldName = line.left(colonIndex);
-
-    fieldValue = line.mid(colonIndex + 1);
-
-    if (fieldValue.startsWith(' ')) {
-
-      fieldValue.remove(0, 1);
-    }
-
   } else {
-
-    fieldName = line;
-  }
-
-  if (fieldName == "data") {
-
-    if (!m_currentSseData.isEmpty()) {
-
-      m_currentSseData.append('\n');
-    }
-
-    m_currentSseData.append(fieldValue);
-  }
-}
-
-void LlmClient::dispatchSseMessage(const QByteArray &rawPayload) {
-  const QByteArray payload = rawPayload.trimmed();
-
-  if (payload.isEmpty()) {
-    return;
-  }
-
-  if (payload == "[DONE]") {
-    return;
-  }
-
-  QJsonParseError parseError;
-
-  const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
-
-  if (parseError.error != QJsonParseError::NoError) {
-
-    qWarning() << "[LLM] Failed to parse SSE JSON payload:"
-               << parseError.errorString() << payload;
-
-    return;
-  }
-
-  if (!document.isObject()) {
-    return;
-  }
-
-  const QJsonObject root = document.object();
-
-  const QJsonValue choicesValue = root.value(QStringLiteral("choices"));
-
-  if (!choicesValue.isArray()) {
-    return;
-  }
-
-  const QJsonArray choices = choicesValue.toArray();
-
-  if (choices.isEmpty()) {
-    return;
-  }
-
-  const QJsonObject choice = choices.first().toObject();
-
-  QJsonObject delta = choice.value(QStringLiteral("delta")).toObject();
-
-  if (delta.isEmpty()) {
-
-    delta = choice.value(QStringLiteral("message")).toObject();
-  }
-
-  const QString content = delta.value(QStringLiteral("content")).toString();
-
-  if (!content.isEmpty()) {
-
-    emit deltaReceived(content);
-  }
-}
-
-QString LlmClient::buildReplyError(QNetworkReply *reply) const {
-  if (!reply) {
-
-    return QStringLiteral("LLM request failed.");
-  }
-
-  const int statusCode =
-      reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-
-  const QByteArray body = reply->readAll();
-
-  QString message;
-
-  QJsonParseError parseError;
-
-  const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
-
-  if (parseError.error == QJsonParseError::NoError && document.isObject()) {
-
-    const QJsonObject root = document.object();
-
-    const QJsonObject errorObject =
-        root.value(QStringLiteral("error")).toObject();
-
-    if (!errorObject.isEmpty()) {
-
-      message = errorObject.value(QStringLiteral("message")).toString();
-
-      if (message.isEmpty()) {
-
-        message = errorObject.value(QStringLiteral("detail")).toString();
-      }
-    }
-
-    if (message.isEmpty()) {
-
-      message = root.value(QStringLiteral("message")).toString();
+    if (!startSelectedLlmModel()) {
+      qWarning() << "[InferenceService]"
+                 << "No installed local LLM model is selected.";
     }
   }
 
-  if (message.isEmpty()) {
-
-    message = QString::fromUtf8(body).trimmed();
+  if (!m_ttsManager->initialize(QString(), true)) {
+    emit serviceError(QStringLiteral("Failed to initialize TTS."));
   }
 
-  QString result = QStringLiteral("LLM request failed");
+  const QString environmentModel =
+      qEnvironmentVariable("QF_STT_MODEL").trimmed();
 
-  if (statusCode > 0) {
+  if (!environmentModel.isEmpty()) {
+    const SttModel selectedFromEnvironment =
+        sttModelFromString(environmentModel);
 
-    result += QStringLiteral(" (HTTP %1)").arg(statusCode);
+    if (selectedFromEnvironment != SttModel::Nemotron35 ||
+        environmentModel.compare(QStringLiteral("nemotron-3.5"),
+                                 Qt::CaseInsensitive) == 0) {
+      m_sttModel = selectedFromEnvironment;
+    }
   }
 
-  const QString networkError = reply->errorString().trimmed();
+  const QString resolvedSttPath = resolveSttModelPath(sttModelPath);
 
-  if (!message.isEmpty()) {
+  if (resolvedSttPath.isEmpty()) {
+    emit serviceError(
+        QStringLiteral("No STT model path was found for model '%1'.")
+            .arg(sttModelName()));
+  } else {
+    m_sttModelPath = resolvedSttPath;
 
-    result += QStringLiteral(": ") + message;
+    const int gpu = resolveSttGpu();
 
-  } else if (!networkError.isEmpty()) {
+    qDebug() << "[InferenceService] Using NeMo-Speech STT:" << m_sttModelPath
+             << "model=" << sttModelName() << "gpu=" << gpu;
 
-    result += QStringLiteral(": ") + networkError;
+    const QString language = qEnvironmentVariable("QF_STT_LANGUAGE").trimmed();
+
+    auto transcriber =
+        std::make_unique<NemoTranscriber>(resolvedSttPath, gpu, language, this);
+
+    if (transcriber->isLoaded()) {
+      connect(transcriber.get(), &NemoTranscriber::transcriptionFinished, this,
+              &InferenceService::transcriptionFinished);
+
+      connect(transcriber.get(), &NemoTranscriber::transcriptionError, this,
+              [this](const QString &error) {
+                emit transcriptionError(error);
+
+                emit serviceError(error);
+              });
+
+      m_stt = std::move(transcriber);
+
+      m_sttReady = true;
+
+      emit sttModelChanged(sttModelName());
+    } else {
+      emit serviceError(
+          QStringLiteral("Failed to load NeMo-Speech ASR model: %1")
+              .arg(resolvedSttPath));
+    }
   }
 
-  return result;
+  m_initialized = true;
+
+  return true;
 }
 
-void LlmClient::onFinished() {
-  auto *reply = qobject_cast<QNetworkReply *>(sender());
+bool InferenceService::validateLlmConfig(const LlmConfig &config,
+                                         QString *error) const {
+  if (config.mode == LlmMode::Local) {
+    return true;
+  }
 
-  if (!reply) {
+  const QString endpoint = config.endpoint.trimmed();
+
+  if (endpoint.isEmpty()) {
+    if (error) {
+      *error = QStringLiteral("Remote LLM mode requires an endpoint.");
+    }
+    return false;
+  }
+
+  const QUrl url(endpoint);
+
+  if (!url.isValid() || url.isEmpty() || url.scheme().isEmpty() ||
+      url.host().isEmpty()) {
+    if (error) {
+      *error =
+          QStringLiteral("Remote LLM endpoint is invalid: %1").arg(endpoint);
+    }
+    return false;
+  }
+
+  if (config.model.trimmed().isEmpty()) {
+    if (error) {
+      *error = QStringLiteral("Remote LLM mode requires a model ID.");
+    }
+    return false;
+  }
+
+  if (config.authType == LlmAuthType::Bearer &&
+      config.apiKey.trimmed().isEmpty()) {
+    if (error) {
+      *error = QStringLiteral(
+          "Bearer-authenticated remote LLM mode requires an API key.");
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool InferenceService::configureRemoteLlm() {
+  QString validationError;
+
+  if (!validateLlmConfig(m_llmConfig, &validationError)) {
+    emit serviceError(validationError);
+
+    return false;
+  }
+
+  if (m_llamaManager) {
+    m_llamaManager->stop();
+  }
+
+  m_llmReady = false;
+
+  m_llmEndpoint = m_llmConfig.endpoint.trimmed();
+
+  m_llmModel = m_llmConfig.model.trimmed();
+
+  m_llmReady = true;
+
+  qDebug() << "[InferenceService] Using remote LLM:" << m_llmEndpoint
+           << "model=" << m_llmModel << "auth="
+           << (m_llmConfig.authType == LlmAuthType::Bearer &&
+               !m_llmConfig.apiKey.isEmpty());
+
+  emit llmConfigurationChanged();
+  emit llmReady();
+
+  return true;
+}
+
+bool InferenceService::setLlmConfig(const LlmConfig &config) {
+  QString validationError;
+
+  if (!validateLlmConfig(config, &validationError)) {
+    emit llmError(validationError);
+
+    return false;
+  }
+
+  m_llmConfig = config;
+
+  emit llmConfigurationChanged();
+
+  if (!m_initialized) {
+    return true;
+  }
+
+  if (m_llmConfig.mode == LlmMode::Remote) {
+    return configureRemoteLlm();
+  }
+
+  m_llmReady = false;
+
+  m_llmEndpoint.clear();
+  m_llmModel.clear();
+
+  if (!startSelectedLlmModel()) {
+    emit llmError(
+        QStringLiteral("Unable to start the selected local LLM model."));
+
+    return false;
+  }
+
+  return true;
+}
+
+InferenceService::LlmMode InferenceService::llmMode() const {
+  return m_llmConfig.mode;
+}
+
+QString InferenceService::llmEndpoint() const { return m_llmEndpoint; }
+
+QString InferenceService::llmModel() const { return m_llmModel; }
+
+ModelManager *InferenceService::models() const { return m_modelManager.get(); }
+
+QString InferenceService::modelDirectory() const {
+  if (!m_modelManager)
+    return QString();
+
+  return m_modelManager->storageDirectory();
+}
+
+bool InferenceService::setModelDirectory(const QString &directory) {
+  if (!m_modelManager)
+    return false;
+
+  return m_modelManager->setStorageDirectory(directory);
+}
+
+void InferenceService::searchLlmModels(const QString &query, int limit) {
+  if (m_modelManager) {
+    m_modelManager->searchRemoteLlmModels(query, limit);
+  }
+}
+
+void InferenceService::inspectLlmModel(const QString &repoId) {
+  if (m_modelManager) {
+    m_modelManager->inspectRemoteModel(repoId);
+  }
+}
+
+QList<ModelManager::RemoteModel> InferenceService::remoteLlmModels() const {
+  if (!m_modelManager)
+    return {};
+
+  return m_modelManager->remoteModels();
+}
+
+QList<ModelManager::ModelVariant>
+InferenceService::remoteLlmVariants(const QString &repoId) const {
+  if (!m_modelManager)
+    return {};
+
+  return m_modelManager->remoteVariants(repoId);
+}
+
+QString InferenceService::selectedLlmModelId() const {
+  if (!m_modelManager)
+    return QString();
+
+  return m_modelManager->selectedModelId();
+}
+
+ModelManager::ModelVariant InferenceService::selectedLlmModel() const {
+  if (!m_modelManager)
+    return {};
+
+  return m_modelManager->selectedModel();
+}
+
+bool InferenceService::selectLlmModel(
+    const ModelManager::ModelVariant &variant) {
+  if (!m_modelManager)
+    return false;
+
+  return m_modelManager->selectModel(variant);
+}
+
+bool InferenceService::selectLlmModel(const QString &modelPathOrId) {
+  if (!m_modelManager)
+    return false;
+
+  return m_modelManager->selectModel(modelPathOrId);
+}
+
+void InferenceService::downloadLlmModel(
+    const ModelManager::ModelVariant &variant) {
+  if (m_modelManager) {
+    m_modelManager->downloadModel(variant);
+  }
+}
+
+void InferenceService::cancelModelDownload() {
+  if (m_modelManager)
+    m_modelManager->cancelDownload();
+}
+
+void InferenceService::onModelSelected(const QString &modelId) {
+  emit selectedLlmModelChanged(modelId);
+
+  if (!m_initialized)
+    return;
+
+  if (m_llmConfig.mode != LlmMode::Local) {
     return;
   }
 
-  if (reply != m_currentReply) {
+  startSelectedLlmModel();
+}
 
-    qDebug() << "[LlmClient] Ignoring stale finished reply=" << reply;
+bool InferenceService::startSelectedLlmModel() {
+  if (m_llmConfig.mode != LlmMode::Local) {
+    return false;
+  }
 
-    reply->deleteLater();
+  if (!m_modelManager || !m_llamaManager) {
+    return false;
+  }
+
+  const QString selectedId = m_modelManager->selectedModelId();
+
+  if (selectedId.isEmpty())
+    return false;
+
+  QString modelPath;
+
+  QFileInfo directInfo(selectedId);
+
+  if (!directInfo.isAbsolute()) {
+    directInfo.setFile(QDir(QFPaths::llmModelsDir()).filePath(selectedId));
+  }
+
+  if (directInfo.exists() && directInfo.isFile() && directInfo.isReadable()) {
+    modelPath = directInfo.absoluteFilePath();
+  } else {
+    const ModelManager::ModelVariant variant = m_modelManager->selectedModel();
+
+    if (!variant.id.isEmpty() && m_modelManager->isVariantInstalled(variant)) {
+      modelPath = m_modelManager->variantEntryPath(variant);
+    }
+  }
+
+  if (modelPath.isEmpty()) {
+    qWarning() << "[InferenceService] Selected model has no valid local path:"
+               << selectedId;
+
+    return false;
+  }
+
+  const QFileInfo modelInfo(modelPath);
+
+  if (!modelInfo.exists() || !modelInfo.isFile() || !modelInfo.isReadable()) {
+    qWarning() << "[InferenceService] Model path is invalid:" << modelPath;
+
+    return false;
+  }
+
+  m_llmModel = QStringLiteral("/models/%1").arg(modelInfo.fileName());
+
+  qDebug() << "[InferenceService] Starting selected local model:" << selectedId;
+
+  qDebug() << "[InferenceService] Host model path:" << modelPath;
+
+  qDebug() << "[InferenceService] API model ID:" << m_llmModel;
+
+  qDebug() << "[InferenceService] Llama backend:"
+           << static_cast<int>(m_llamaBackend);
+
+  m_llmReady = false;
+
+  m_llamaManager->stop();
+
+  if (!m_llamaManager->configure(modelPath, m_llamaBackend)) {
+    return false;
+  }
+
+  m_llmEndpoint = QStringLiteral("http://127.0.0.1:8081/v1/chat/completions");
+
+  m_llamaManager->start();
+
+  return true;
+}
+
+void InferenceService::sendChatRequest(const QJsonArray &messages,
+                                       const QString &model, double temperature,
+                                       int timeoutMs, const QString &grammar,
+                                       const QJsonObject &responseFormat,
+                                       const QJsonArray &tools) {
+  if (!m_llmClient)
+    return;
+
+  if (m_llmEndpoint.isEmpty()) {
+    emit llmError(QStringLiteral("No LLM endpoint is configured."));
 
     return;
   }
 
-  m_currentReply = nullptr;
-
-  const bool aborted = m_abortRequested;
-
-  const bool failed = m_requestFailed;
-
-  const QNetworkReply::NetworkError error = reply->error();
-
-  const int statusCode =
-      reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-
-  qDebug() << "[LlmClient] Finished reply=" << reply << "aborted=" << aborted
-           << "failed=" << failed << "error=" << error
-           << "httpStatus=" << statusCode;
-
-  if (aborted) {
-
-    reply->deleteLater();
-
-    m_streamBuffer.clear();
-    m_currentSseData.clear();
-
-    m_abortRequested = false;
-
-    m_requestFailed = false;
+  if (!m_llmReady) {
+    emit llmError(QStringLiteral("LLM service is not ready."));
 
     return;
+  }
+
+  LlmClient::Request request;
+
+  request.url = m_llmEndpoint;
+
+  request.model = model.isEmpty() ? m_llmModel : model;
+
+  request.messages = messages;
+
+  request.temperature = temperature;
+
+  request.timeoutMs = timeoutMs;
+
+  if (m_llmConfig.mode == LlmMode::Local) {
+    request.grammar = grammar;
+  }
+
+  if (m_llmConfig.mode == LlmMode::Remote) {
+    request.responseFormat = responseFormat;
   }
 
   /*
-   * HTTP errors need to be handled before the successful
-   * streaming path.
+   * Tools are supported by both llama.cpp (with recent patches) and
+   * OpenAI-compatible remote providers. Pass them through unconditionally
+   * when non-empty; the backend is responsible for rejecting them if it
+   * cannot handle them.
    */
-  if (statusCode > 0 && (statusCode < 200 || statusCode >= 300)) {
+  request.tools = tools;
 
-    m_requestFailed = true;
+  if (m_llmConfig.mode == LlmMode::Remote) {
+    request.authType = m_llmConfig.authType == LlmAuthType::Bearer
+                           ? LlmClient::AuthType::Bearer
+                           : LlmClient::AuthType::None;
 
-    emit requestError(buildReplyError(reply));
-
-    reply->deleteLater();
-
-    m_streamBuffer.clear();
-    m_currentSseData.clear();
-
-    m_abortRequested = false;
-
-    m_requestFailed = false;
-
-    return;
+    request.apiKey = m_llmConfig.apiKey;
   }
 
-  if (!failed && error == QNetworkReply::NoError) {
+  qDebug() << "[InferenceService] Sending chat request"
+           << "mode="
+           << (m_llmConfig.mode == LlmMode::Local ? QStringLiteral("local")
+                                                  : QStringLiteral("remote"))
+           << "model=" << request.model
+           << "messages=" << request.messages.size()
+           << "temperature=" << request.temperature
+           << "timeoutMs=" << request.timeoutMs
+           << "hasGrammar=" << !request.grammar.isEmpty()
+           << "hasResponseFormat=" << !request.responseFormat.isEmpty()
+           << "toolCount=" << request.tools.size()
+           << "authenticated="
+           << (request.authType == LlmClient::AuthType::Bearer &&
+               !request.apiKey.isEmpty());
 
-    /*
-     * Process any final complete SSE lines.
-     */
-    consumeStreamBuffer();
-
-    /*
-     * A final event may not have a trailing newline.
-     */
-    if (!m_streamBuffer.isEmpty()) {
-
-      QByteArray remaining = m_streamBuffer;
-
-      m_streamBuffer.clear();
-
-      if (remaining.endsWith('\r')) {
-
-        remaining.chop(1);
-      }
-
-      processSseLine(remaining);
-    }
-
-    if (!m_currentSseData.isEmpty()) {
-
-      dispatchSseMessage(m_currentSseData);
-
-      m_currentSseData.clear();
-    }
-
-    emit requestFinished();
-
-  } else if (!m_requestFailed) {
-
-    m_requestFailed = true;
-
-    emit requestError(buildReplyError(reply));
-  }
-
-  reply->deleteLater();
-
-  m_streamBuffer.clear();
-  m_currentSseData.clear();
-
-  m_abortRequested = false;
-
-  m_requestFailed = false;
+  m_llmClient->sendRequest(request);
 }
 
-void LlmClient::onError(QNetworkReply::NetworkError error) {
-  Q_UNUSED(error)
+void InferenceService::abortChatRequest() {
+  if (m_llmClient)
+    m_llmClient->abortRequest();
+}
 
-  auto *reply = qobject_cast<QNetworkReply *>(sender());
+bool InferenceService::isLlmReady() const { return m_llmReady; }
 
-  if (!reply) {
+void InferenceService::onLlmServerReady() {
+  if (m_llmConfig.mode != LlmMode::Local) {
     return;
   }
 
-  if (reply != m_currentReply) {
+  m_llmReady = true;
 
-    qDebug() << "[LlmClient] Ignoring stale error reply=" << reply;
+  emit llmReady();
 
+  qDebug() << "[InferenceService] Local LLM ready:" << m_llmEndpoint
+           << "model=" << m_llmModel;
+}
+
+void InferenceService::onLlamaError(const QString &error) {
+  if (m_llmConfig.mode != LlmMode::Local) {
     return;
   }
 
-  if (m_abortRequested) {
+  m_llmReady = false;
+
+  emit llmError(error);
+
+  emit serviceError(error);
+}
+
+QString InferenceService::transcribe(const std::vector<float> &pcm32f) {
+  if (!m_sttReady || !m_stt || pcm32f.empty()) {
+    return QString();
+  }
+
+  return m_stt->transcribe(pcm32f);
+}
+
+bool InferenceService::isSttReady() const { return m_sttReady; }
+
+InferenceService::SttModel InferenceService::sttModel() const {
+  return m_sttModel;
+}
+
+QString InferenceService::sttModelName() const {
+  return sttModelToString(m_sttModel);
+}
+
+QString InferenceService::sttModelPath() const { return m_sttModelPath; }
+
+bool InferenceService::setSttModel(SttModel model) {
+  if (m_sttModel == model)
+    return true;
+
+  m_sttModel = model;
+
+  m_sttReady = false;
+
+  m_stt.reset();
+
+  const QString path = resolveSttModelPath(QString());
+
+  if (path.isEmpty()) {
+    emit serviceError(
+        QStringLiteral("STT model is not installed: %1").arg(sttModelName()));
+
+    return false;
+  }
+
+  const QString language = qEnvironmentVariable("QF_STT_LANGUAGE").trimmed();
+
+  const int gpu = resolveSttGpu();
+
+  auto transcriber =
+      std::make_unique<NemoTranscriber>(path, gpu, language, this);
+
+  if (!transcriber->isLoaded()) {
+    emit serviceError(QStringLiteral("Failed to load STT model: %1").arg(path));
+
+    return false;
+  }
+
+  connect(transcriber.get(), &NemoTranscriber::transcriptionFinished, this,
+          &InferenceService::transcriptionFinished);
+
+  connect(transcriber.get(), &NemoTranscriber::transcriptionError, this,
+          [this](const QString &error) {
+            emit transcriptionError(error);
+
+            emit serviceError(error);
+          });
+
+  m_stt = std::move(transcriber);
+
+  m_sttModelPath = path;
+
+  m_sttReady = true;
+
+  emit sttModelChanged(sttModelName());
+
+  return true;
+}
+
+bool InferenceService::setSttModelName(const QString &model) {
+  const QString normalized = model.trimmed().toLower();
+
+  if (normalized.isEmpty())
+    return false;
+
+  const SttModel selected = sttModelFromString(normalized);
+
+  if (normalized != QStringLiteral("nemotron-3.5") &&
+      normalized != QStringLiteral("nemotron-en") &&
+      normalized != QStringLiteral("parakeet-tdt") &&
+      normalized != QStringLiteral("parakeet-ctc")) {
+    emit serviceError(QStringLiteral("Unknown STT model '%1'.").arg(model));
+
+    return false;
+  }
+
+  return setSttModel(selected);
+}
+
+QStringList InferenceService::availableSttModels() const {
+  return {QStringLiteral("nemotron-3.5"), QStringLiteral("nemotron-en"),
+          QStringLiteral("parakeet-tdt"), QStringLiteral("parakeet-ctc")};
+}
+
+bool InferenceService::isTtsReady() const { return m_ttsReady; }
+
+bool InferenceService::isTtsEnabled() const {
+  if (!m_ttsManager)
+    return false;
+
+  return m_ttsManager->isEnabled();
+}
+
+void InferenceService::setTtsEnabled(bool enabled) {
+  if (!m_ttsManager)
+    return;
+
+  m_ttsManager->setEnabled(enabled);
+
+  emit ttsEnabledChanged(enabled);
+}
+
+void InferenceService::speak(const QString &text, int speakerId) {
+  if (!m_ttsManager || !m_ttsReady || !m_ttsManager->isEnabled()) {
     return;
   }
 
-  /*
-   * Delay the actual error signal until onFinished().
-   *
-   * That gives us the HTTP status and provider response body,
-   * which is much more useful than only Qt's network error.
-   */
-  m_requestFailed = true;
+  m_ttsManager->enqueueSentence(text, speakerId);
+}
+
+void InferenceService::stopSpeech() {
+  if (m_ttsManager)
+    m_ttsManager->stopAndClear();
+}
+
+QString InferenceService::ttsVoice() const {
+  if (!m_ttsManager)
+    return QString();
+
+  return m_ttsManager->voice();
+}
+
+void InferenceService::setTtsVoice(const QString &voice) {
+  if (m_ttsManager) {
+    m_ttsManager->setVoice(voice);
+  }
+}
+
+QStringList InferenceService::ttsVoices() const {
+  if (!m_ttsManager)
+    return {};
+
+  return m_ttsManager->availableVoices();
+}
+
+void InferenceService::refreshTtsVoices() {
+  if (m_ttsManager)
+    m_ttsManager->refreshVoices();
+}
+
+void InferenceService::onTtsServerReady() {
+  m_ttsReady = true;
+
+  emit ttsReady();
+
+  qDebug() << "[InferenceService] TTS ready.";
+}
+
+QString InferenceService::resolveSttModelFilename(SttModel model) const {
+  switch (model) {
+  case SttModel::Nemotron35:
+    return QStringLiteral("nemotron-3.5-asr-streaming-0.6b.q8_0.gguf");
+
+  case SttModel::NemotronEnglish:
+    return QStringLiteral("nemotron-speech-streaming-en-0.6b.q8_0.gguf");
+
+  case SttModel::ParakeetTdt:
+    return QStringLiteral("parakeet-tdt-0.6b-v3.q8_0.gguf");
+
+  case SttModel::ParakeetCtc:
+    return QStringLiteral("parakeet-ctc-1.1b.q8_0.gguf");
+  }
+
+  return QString();
+}
+
+QString InferenceService::sttModelToString(SttModel model) const {
+  switch (model) {
+  case SttModel::Nemotron35:
+    return QStringLiteral("nemotron-3.5");
+
+  case SttModel::NemotronEnglish:
+    return QStringLiteral("nemotron-en");
+
+  case SttModel::ParakeetTdt:
+    return QStringLiteral("parakeet-tdt");
+
+  case SttModel::ParakeetCtc:
+    return QStringLiteral("parakeet-ctc");
+  }
+
+  return QStringLiteral("nemotron-3.5");
+}
+
+InferenceService::SttModel
+InferenceService::sttModelFromString(const QString &model) const {
+  const QString normalized = model.trimmed().toLower();
+
+  if (normalized == QStringLiteral("nemotron-en")) {
+    return SttModel::NemotronEnglish;
+  }
+
+  if (normalized == QStringLiteral("parakeet-tdt")) {
+    return SttModel::ParakeetTdt;
+  }
+
+  if (normalized == QStringLiteral("parakeet-ctc")) {
+    return SttModel::ParakeetCtc;
+  }
+
+  return SttModel::Nemotron35;
+}
+
+int InferenceService::resolveSttGpu() const {
+  const QString value = qEnvironmentVariable("QF_STT_GPU", "0").trimmed();
+
+  bool ok = false;
+
+  const int gpu = value.toInt(&ok);
+
+  if (!ok)
+    return 0;
+
+  return gpu;
+}
+
+QString
+InferenceService::resolveSttModelPath(const QString &requestedPath) const {
+  if (!requestedPath.trimmed().isEmpty()) {
+    const QFileInfo info(requestedPath);
+
+    if (info.exists() && info.isFile() && info.isReadable()) {
+      qDebug() << "[InferenceService] Using requested STT model:"
+               << info.absoluteFilePath();
+
+      return info.absoluteFilePath();
+    }
+
+    qWarning() << "[InferenceService] Requested STT model is invalid:"
+               << requestedPath;
+  }
+
+  const QString environmentPath =
+      qEnvironmentVariable("QF_STT_MODEL_PATH").trimmed();
+
+  if (!environmentPath.isEmpty()) {
+    const QFileInfo info(environmentPath);
+
+    if (info.exists() && info.isFile() && info.isReadable()) {
+      qDebug() << "[InferenceService] Using QF_STT_MODEL_PATH:"
+               << info.absoluteFilePath();
+
+      return info.absoluteFilePath();
+    }
+
+    qWarning() << "[InferenceService] QF_STT_MODEL_PATH is invalid:"
+               << environmentPath;
+  }
+
+  const QString filename = resolveSttModelFilename(m_sttModel);
+
+  if (filename.isEmpty())
+    return QString();
+
+  const QString modelPath = QDir(QFPaths::sttModelsDir()).filePath(filename);
+
+  const QFileInfo info(modelPath);
+
+  if (info.exists() && info.isFile() && info.isReadable()) {
+    qDebug() << "[InferenceService] Using shared STT model:" << modelPath;
+
+    return info.absoluteFilePath();
+  }
+
+  qWarning() << "[InferenceService] STT model not found:" << modelPath;
+
+  return QString();
+}
+
+QString InferenceService::extractText(const QImage &image) {
+  Q_UNUSED(image)
+
+  return {};
 }

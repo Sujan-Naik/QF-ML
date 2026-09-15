@@ -53,6 +53,22 @@ public:
      * Used only by remote inference.
      */
     QJsonObject responseFormat;
+
+    /*
+     * OpenAI-compatible tool definitions. Each entry has the shape:
+     *
+     * {
+     *   "type": "function",
+     *   "function": {
+     *     "name": "write_file",
+     *     "description": "...",
+     *     "parameters": { ... JSON schema ... }
+     *   }
+     * }
+     *
+     * Empty means no tools are exposed for this request.
+     */
+    QJsonArray tools;
   };
 
   explicit LlmClient(QNetworkAccessManager *networkManager,
@@ -68,6 +84,11 @@ signals:
   void deltaReceived(const QString &text);
 
   void requestFinished();
+
+  // Emitted instead of requestFinished when the response contained
+  // tool_calls. The array is in OpenAI response format: each entry has
+  // "id", "type", and "function": {"name": ..., "arguments": ...}.
+  void toolCallsReceived(const QJsonArray &toolCalls);
 
   void requestError(const QString &error);
 
@@ -85,6 +106,10 @@ private:
 
   void dispatchSseMessage(const QByteArray &rawPayload);
 
+  void accumulateToolCallDelta(const QJsonArray &deltas);
+
+  QJsonArray finaliseToolCalls() const;
+
   QString buildReplyError(QNetworkReply *reply) const;
 
 private:
@@ -95,6 +120,16 @@ private:
   QByteArray m_streamBuffer;
 
   QByteArray m_currentSseData;
+
+  // Tool-call fragments accumulated across SSE deltas, keyed by the
+  // "index" field the API assigns. Each entry holds id, name, and the
+  // accumulated arguments string.
+  struct ToolCallAccumulator {
+    QString id;
+    QString name;
+    QString arguments;
+  };
+  QMap<int, ToolCallAccumulator> m_toolCallAccumulators;
 
   bool m_requestFailed = false;
 
