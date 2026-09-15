@@ -108,7 +108,8 @@ public:
                        const QString &model = QString(),
                        double temperature = 0.7, int timeoutMs = 120000,
                        const QString &grammar = QString(),
-                       const QJsonObject &responseFormat = QJsonObject());
+                       const QJsonObject &responseFormat = QJsonObject(),
+                       const QJsonArray &tools = QJsonArray());
 
   void abortChatRequest();
 
@@ -166,6 +167,12 @@ signals:
   void llmDelta(const QString &text);
 
   void llmFinished();
+
+  // Emitted instead of llmFinished when the model requested one or more
+  // tool calls. The array is in OpenAI response format. The caller is
+  // expected to execute the tools and send another request with the
+  // results included as role: "tool" messages.
+  void llmToolCalls(const QJsonArray &toolCalls);
 
   void llmError(const QString &error);
 

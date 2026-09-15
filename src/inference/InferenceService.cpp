@@ -27,15 +27,14 @@ InferenceService::InferenceService(QObject *parent)
 
   m_llmClient = std::make_unique<LlmClient>(m_networkManager, this);
 
-  // -------------------------------------------------------------------------
-  // LLM client
-  // -------------------------------------------------------------------------
-
   connect(m_llmClient.get(), &LlmClient::deltaReceived, this,
           &InferenceService::llmDelta);
 
   connect(m_llmClient.get(), &LlmClient::requestFinished, this,
           &InferenceService::llmFinished);
+
+  connect(m_llmClient.get(), &LlmClient::toolCallsReceived, this,
+          &InferenceService::llmToolCalls);
 
   connect(m_llmClient.get(), &LlmClient::requestError, this,
           [this](const QString &error) {
@@ -44,19 +43,11 @@ InferenceService::InferenceService(QObject *parent)
             emit serviceError(error);
           });
 
-  // -------------------------------------------------------------------------
-  // Llama
-  // -------------------------------------------------------------------------
-
   connect(m_llamaManager.get(), &LlamaManager::serverReady, this,
           &InferenceService::onLlmServerReady);
 
   connect(m_llamaManager.get(), &LlamaManager::errorOccurred, this,
           &InferenceService::onLlamaError);
-
-  // -------------------------------------------------------------------------
-  // Model manager
-  // -------------------------------------------------------------------------
 
   connect(m_modelManager.get(), &ModelManager::remoteModelsChanged, this,
           &InferenceService::remoteLlmModelsChanged);
@@ -82,10 +73,6 @@ InferenceService::InferenceService(QObject *parent)
   connect(m_modelManager.get(), &ModelManager::downloadError, this,
           &InferenceService::modelDownloadError);
 
-  // -------------------------------------------------------------------------
-  // TTS
-  // -------------------------------------------------------------------------
-
   connect(m_ttsManager.get(), &TtsManager::serverReady, this,
           &InferenceService::onTtsServerReady);
 
@@ -108,10 +95,6 @@ InferenceService::InferenceService(QObject *parent)
 
 InferenceService::~InferenceService() = default;
 
-// =============================================================================
-// Initialization
-// =============================================================================
-
 bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
                                   const QString &sttModelPath,
                                   SttModel sttModel) {
@@ -132,7 +115,6 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
   QString configError;
 
   if (!validateLlmConfig(llmConfig, &configError)) {
-
     emit serviceError(configError);
 
     return false;
@@ -149,51 +131,31 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
            << "sttModel=" << sttModelToString(m_sttModel)
            << "llmMode=" << static_cast<int>(m_llmConfig.mode);
 
-  // -------------------------------------------------------------------------
-  // LLM
-  // -------------------------------------------------------------------------
-
   if (m_llmConfig.mode == LlmMode::Remote) {
-
     if (!configureRemoteLlm()) {
-
       return false;
     }
-
   } else {
-
     if (!startSelectedLlmModel()) {
-
       qWarning() << "[InferenceService]"
                  << "No installed local LLM model is selected.";
     }
   }
 
-  // -------------------------------------------------------------------------
-  // TTS
-  // -------------------------------------------------------------------------
-
   if (!m_ttsManager->initialize(QString(), true)) {
-
     emit serviceError(QStringLiteral("Failed to initialize TTS."));
   }
-
-  // -------------------------------------------------------------------------
-  // STT
-  // -------------------------------------------------------------------------
 
   const QString environmentModel =
       qEnvironmentVariable("QF_STT_MODEL").trimmed();
 
   if (!environmentModel.isEmpty()) {
-
     const SttModel selectedFromEnvironment =
         sttModelFromString(environmentModel);
 
     if (selectedFromEnvironment != SttModel::Nemotron35 ||
         environmentModel.compare(QStringLiteral("nemotron-3.5"),
                                  Qt::CaseInsensitive) == 0) {
-
       m_sttModel = selectedFromEnvironment;
     }
   }
@@ -201,13 +163,10 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
   const QString resolvedSttPath = resolveSttModelPath(sttModelPath);
 
   if (resolvedSttPath.isEmpty()) {
-
     emit serviceError(
         QStringLiteral("No STT model path was found for model '%1'.")
             .arg(sttModelName()));
-
   } else {
-
     m_sttModelPath = resolvedSttPath;
 
     const int gpu = resolveSttGpu();
@@ -221,7 +180,6 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
         std::make_unique<NemoTranscriber>(resolvedSttPath, gpu, language, this);
 
     if (transcriber->isLoaded()) {
-
       connect(transcriber.get(), &NemoTranscriber::transcriptionFinished, this,
               &InferenceService::transcriptionFinished);
 
@@ -237,9 +195,7 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
       m_sttReady = true;
 
       emit sttModelChanged(sttModelName());
-
     } else {
-
       emit serviceError(
           QStringLiteral("Failed to load NeMo-Speech ASR model: %1")
               .arg(resolvedSttPath));
@@ -260,12 +216,9 @@ bool InferenceService::validateLlmConfig(const LlmConfig &config,
   const QString endpoint = config.endpoint.trimmed();
 
   if (endpoint.isEmpty()) {
-
     if (error) {
-
       *error = QStringLiteral("Remote LLM mode requires an endpoint.");
     }
-
     return false;
   }
 
@@ -273,35 +226,26 @@ bool InferenceService::validateLlmConfig(const LlmConfig &config,
 
   if (!url.isValid() || url.isEmpty() || url.scheme().isEmpty() ||
       url.host().isEmpty()) {
-
     if (error) {
-
       *error =
           QStringLiteral("Remote LLM endpoint is invalid: %1").arg(endpoint);
     }
-
     return false;
   }
 
   if (config.model.trimmed().isEmpty()) {
-
     if (error) {
-
       *error = QStringLiteral("Remote LLM mode requires a model ID.");
     }
-
     return false;
   }
 
   if (config.authType == LlmAuthType::Bearer &&
       config.apiKey.trimmed().isEmpty()) {
-
     if (error) {
-
       *error = QStringLiteral(
           "Bearer-authenticated remote LLM mode requires an API key.");
     }
-
     return false;
   }
 
@@ -312,18 +256,12 @@ bool InferenceService::configureRemoteLlm() {
   QString validationError;
 
   if (!validateLlmConfig(m_llmConfig, &validationError)) {
-
     emit serviceError(validationError);
 
     return false;
   }
 
-  /*
-   * Remote mode must never keep the local llama.cpp Docker
-   * server running.
-   */
   if (m_llamaManager) {
-
     m_llamaManager->stop();
   }
 
@@ -350,7 +288,6 @@ bool InferenceService::setLlmConfig(const LlmConfig &config) {
   QString validationError;
 
   if (!validateLlmConfig(config, &validationError)) {
-
     emit llmError(validationError);
 
     return false;
@@ -365,20 +302,15 @@ bool InferenceService::setLlmConfig(const LlmConfig &config) {
   }
 
   if (m_llmConfig.mode == LlmMode::Remote) {
-
     return configureRemoteLlm();
   }
 
-  /*
-   * Switching to local mode.
-   */
   m_llmReady = false;
 
   m_llmEndpoint.clear();
   m_llmModel.clear();
 
   if (!startSelectedLlmModel()) {
-
     emit llmError(
         QStringLiteral("Unable to start the selected local LLM model."));
 
@@ -395,10 +327,6 @@ InferenceService::LlmMode InferenceService::llmMode() const {
 QString InferenceService::llmEndpoint() const { return m_llmEndpoint; }
 
 QString InferenceService::llmModel() const { return m_llmModel; }
-
-// =============================================================================
-// Models
-// =============================================================================
 
 ModelManager *InferenceService::models() const { return m_modelManager.get(); }
 
@@ -418,14 +346,12 @@ bool InferenceService::setModelDirectory(const QString &directory) {
 
 void InferenceService::searchLlmModels(const QString &query, int limit) {
   if (m_modelManager) {
-
     m_modelManager->searchRemoteLlmModels(query, limit);
   }
 }
 
 void InferenceService::inspectLlmModel(const QString &repoId) {
   if (m_modelManager) {
-
     m_modelManager->inspectRemoteModel(repoId);
   }
 }
@@ -464,11 +390,6 @@ bool InferenceService::selectLlmModel(
   if (!m_modelManager)
     return false;
 
-  /*
-   * ModelManager is still available in remote mode so clients
-   * can browse/download local models. Selecting a model does
-   * not start it unless local LLM mode is active.
-   */
   return m_modelManager->selectModel(variant);
 }
 
@@ -482,7 +403,6 @@ bool InferenceService::selectLlmModel(const QString &modelPathOrId) {
 void InferenceService::downloadLlmModel(
     const ModelManager::ModelVariant &variant) {
   if (m_modelManager) {
-
     m_modelManager->downloadModel(variant);
   }
 }
@@ -498,10 +418,6 @@ void InferenceService::onModelSelected(const QString &modelId) {
   if (!m_initialized)
     return;
 
-  /*
-   * Selecting a local model must never start Docker while the
-   * active LLM is remote.
-   */
   if (m_llmConfig.mode != LlmMode::Local) {
     return;
   }
@@ -525,31 +441,23 @@ bool InferenceService::startSelectedLlmModel() {
 
   QString modelPath;
 
-  // Check if selectedId is a direct file path or filename
-  // within the LLM directory.
   QFileInfo directInfo(selectedId);
 
   if (!directInfo.isAbsolute()) {
-
     directInfo.setFile(QDir(QFPaths::llmModelsDir()).filePath(selectedId));
   }
 
   if (directInfo.exists() && directInfo.isFile() && directInfo.isReadable()) {
-
     modelPath = directInfo.absoluteFilePath();
-
   } else {
-
     const ModelManager::ModelVariant variant = m_modelManager->selectedModel();
 
     if (!variant.id.isEmpty() && m_modelManager->isVariantInstalled(variant)) {
-
       modelPath = m_modelManager->variantEntryPath(variant);
     }
   }
 
   if (modelPath.isEmpty()) {
-
     qWarning() << "[InferenceService] Selected model has no valid local path:"
                << selectedId;
 
@@ -559,7 +467,6 @@ bool InferenceService::startSelectedLlmModel() {
   const QFileInfo modelInfo(modelPath);
 
   if (!modelInfo.exists() || !modelInfo.isFile() || !modelInfo.isReadable()) {
-
     qWarning() << "[InferenceService] Model path is invalid:" << modelPath;
 
     return false;
@@ -581,7 +488,6 @@ bool InferenceService::startSelectedLlmModel() {
   m_llamaManager->stop();
 
   if (!m_llamaManager->configure(modelPath, m_llamaBackend)) {
-
     return false;
   }
 
@@ -592,26 +498,21 @@ bool InferenceService::startSelectedLlmModel() {
   return true;
 }
 
-// =============================================================================
-// LLM
-// =============================================================================
-
 void InferenceService::sendChatRequest(const QJsonArray &messages,
                                        const QString &model, double temperature,
                                        int timeoutMs, const QString &grammar,
-                                       const QJsonObject &responseFormat) {
+                                       const QJsonObject &responseFormat,
+                                       const QJsonArray &tools) {
   if (!m_llmClient)
     return;
 
   if (m_llmEndpoint.isEmpty()) {
-
     emit llmError(QStringLiteral("No LLM endpoint is configured."));
 
     return;
   }
 
   if (!m_llmReady) {
-
     emit llmError(QStringLiteral("LLM service is not ready."));
 
     return;
@@ -629,25 +530,23 @@ void InferenceService::sendChatRequest(const QJsonArray &messages,
 
   request.timeoutMs = timeoutMs;
 
-  /*
-   * GBNF is only meaningful to the local llama.cpp backend.
-   */
   if (m_llmConfig.mode == LlmMode::Local) {
-
     request.grammar = grammar;
   }
 
-  /*
-   * JSON Schema structured output is for remote
-   * OpenAI-compatible providers such as OpenRouter.
-   */
   if (m_llmConfig.mode == LlmMode::Remote) {
-
     request.responseFormat = responseFormat;
   }
 
-  if (m_llmConfig.mode == LlmMode::Remote) {
+  /*
+   * Tools are supported by both llama.cpp (with recent patches) and
+   * OpenAI-compatible remote providers. Pass them through unconditionally
+   * when non-empty; the backend is responsible for rejecting them if it
+   * cannot handle them.
+   */
+  request.tools = tools;
 
+  if (m_llmConfig.mode == LlmMode::Remote) {
     request.authType = m_llmConfig.authType == LlmAuthType::Bearer
                            ? LlmClient::AuthType::Bearer
                            : LlmClient::AuthType::None;
@@ -665,6 +564,7 @@ void InferenceService::sendChatRequest(const QJsonArray &messages,
            << "timeoutMs=" << request.timeoutMs
            << "hasGrammar=" << !request.grammar.isEmpty()
            << "hasResponseFormat=" << !request.responseFormat.isEmpty()
+           << "toolCount=" << request.tools.size()
            << "authenticated="
            << (request.authType == LlmClient::AuthType::Bearer &&
                !request.apiKey.isEmpty());
@@ -680,9 +580,6 @@ void InferenceService::abortChatRequest() {
 bool InferenceService::isLlmReady() const { return m_llmReady; }
 
 void InferenceService::onLlmServerReady() {
-  /*
-   * A serverReady signal only matters for local mode.
-   */
   if (m_llmConfig.mode != LlmMode::Local) {
     return;
   }
@@ -707,13 +604,8 @@ void InferenceService::onLlamaError(const QString &error) {
   emit serviceError(error);
 }
 
-// =============================================================================
-// STT
-// =============================================================================
-
 QString InferenceService::transcribe(const std::vector<float> &pcm32f) {
   if (!m_sttReady || !m_stt || pcm32f.empty()) {
-
     return QString();
   }
 
@@ -745,7 +637,6 @@ bool InferenceService::setSttModel(SttModel model) {
   const QString path = resolveSttModelPath(QString());
 
   if (path.isEmpty()) {
-
     emit serviceError(
         QStringLiteral("STT model is not installed: %1").arg(sttModelName()));
 
@@ -760,7 +651,6 @@ bool InferenceService::setSttModel(SttModel model) {
       std::make_unique<NemoTranscriber>(path, gpu, language, this);
 
   if (!transcriber->isLoaded()) {
-
     emit serviceError(QStringLiteral("Failed to load STT model: %1").arg(path));
 
     return false;
@@ -799,7 +689,6 @@ bool InferenceService::setSttModelName(const QString &model) {
       normalized != QStringLiteral("nemotron-en") &&
       normalized != QStringLiteral("parakeet-tdt") &&
       normalized != QStringLiteral("parakeet-ctc")) {
-
     emit serviceError(QStringLiteral("Unknown STT model '%1'.").arg(model));
 
     return false;
@@ -812,10 +701,6 @@ QStringList InferenceService::availableSttModels() const {
   return {QStringLiteral("nemotron-3.5"), QStringLiteral("nemotron-en"),
           QStringLiteral("parakeet-tdt"), QStringLiteral("parakeet-ctc")};
 }
-
-// =============================================================================
-// TTS
-// =============================================================================
 
 bool InferenceService::isTtsReady() const { return m_ttsReady; }
 
@@ -857,7 +742,6 @@ QString InferenceService::ttsVoice() const {
 
 void InferenceService::setTtsVoice(const QString &voice) {
   if (m_ttsManager) {
-
     m_ttsManager->setVoice(voice);
   }
 }
@@ -882,13 +766,8 @@ void InferenceService::onTtsServerReady() {
   qDebug() << "[InferenceService] TTS ready.";
 }
 
-// =============================================================================
-// STT model helpers
-// =============================================================================
-
 QString InferenceService::resolveSttModelFilename(SttModel model) const {
   switch (model) {
-
   case SttModel::Nemotron35:
     return QStringLiteral("nemotron-3.5-asr-streaming-0.6b.q8_0.gguf");
 
@@ -907,7 +786,6 @@ QString InferenceService::resolveSttModelFilename(SttModel model) const {
 
 QString InferenceService::sttModelToString(SttModel model) const {
   switch (model) {
-
   case SttModel::Nemotron35:
     return QStringLiteral("nemotron-3.5");
 
@@ -929,17 +807,14 @@ InferenceService::sttModelFromString(const QString &model) const {
   const QString normalized = model.trimmed().toLower();
 
   if (normalized == QStringLiteral("nemotron-en")) {
-
     return SttModel::NemotronEnglish;
   }
 
   if (normalized == QStringLiteral("parakeet-tdt")) {
-
     return SttModel::ParakeetTdt;
   }
 
   if (normalized == QStringLiteral("parakeet-ctc")) {
-
     return SttModel::ParakeetCtc;
   }
 
@@ -961,16 +836,10 @@ int InferenceService::resolveSttGpu() const {
 
 QString
 InferenceService::resolveSttModelPath(const QString &requestedPath) const {
-  // -------------------------------------------------------------------------
-  // 1. Explicit model path argument
-  // -------------------------------------------------------------------------
-
   if (!requestedPath.trimmed().isEmpty()) {
-
     const QFileInfo info(requestedPath);
 
     if (info.exists() && info.isFile() && info.isReadable()) {
-
       qDebug() << "[InferenceService] Using requested STT model:"
                << info.absoluteFilePath();
 
@@ -981,19 +850,13 @@ InferenceService::resolveSttModelPath(const QString &requestedPath) const {
                << requestedPath;
   }
 
-  // -------------------------------------------------------------------------
-  // 2. Explicit environment path override
-  // -------------------------------------------------------------------------
-
   const QString environmentPath =
       qEnvironmentVariable("QF_STT_MODEL_PATH").trimmed();
 
   if (!environmentPath.isEmpty()) {
-
     const QFileInfo info(environmentPath);
 
     if (info.exists() && info.isFile() && info.isReadable()) {
-
       qDebug() << "[InferenceService] Using QF_STT_MODEL_PATH:"
                << info.absoluteFilePath();
 
@@ -1003,10 +866,6 @@ InferenceService::resolveSttModelPath(const QString &requestedPath) const {
     qWarning() << "[InferenceService] QF_STT_MODEL_PATH is invalid:"
                << environmentPath;
   }
-
-  // -------------------------------------------------------------------------
-  // 3. Shared machine-wide model cache
-  // -------------------------------------------------------------------------
 
   const QString filename = resolveSttModelFilename(m_sttModel);
 
@@ -1018,7 +877,6 @@ InferenceService::resolveSttModelPath(const QString &requestedPath) const {
   const QFileInfo info(modelPath);
 
   if (info.exists() && info.isFile() && info.isReadable()) {
-
     qDebug() << "[InferenceService] Using shared STT model:" << modelPath;
 
     return info.absoluteFilePath();
@@ -1028,10 +886,6 @@ InferenceService::resolveSttModelPath(const QString &requestedPath) const {
 
   return QString();
 }
-
-// =============================================================================
-// OCR
-// =============================================================================
 
 QString InferenceService::extractText(const QImage &image) {
   Q_UNUSED(image)
