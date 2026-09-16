@@ -6,12 +6,26 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTimer>
 #include <QUrl>
 
 LlmClient::LlmClient(QNetworkAccessManager *networkManager, QObject *parent)
     : QObject(parent), m_networkManager(networkManager) {}
 
 void LlmClient::sendRequest(const Request &request) {
+  // If we are currently inside onFinished, do not touch m_currentReply
+  // here: the outer frame still owns it and will clean up when it
+  // returns. Queue the request and let onFinished deliver it.
+  if (m_inFinished) {
+    m_queuedRequest = request;
+    m_hasQueuedRequest = true;
+
+    qDebug() << "[LlmClient] Queued request (reentrant) url=" << request.url
+             << "model=" << request.model;
+
+    return;
+  }
+
   abortRequest();
 
   if (!m_networkManager) {
@@ -90,10 +104,10 @@ void LlmClient::sendRequest(const Request &request) {
 
   m_abortRequested = false;
 
-  m_currentReply = m_networkManager->post(
+  QNetworkReply *reply = m_networkManager->post(
       networkRequest, QJsonDocument(body).toJson(QJsonDocument::Compact));
 
-  QNetworkReply *reply = m_currentReply;
+  m_currentReply = reply;
 
   connect(reply, &QNetworkReply::readyRead, this, &LlmClient::onReadyRead);
 
@@ -115,7 +129,19 @@ void LlmClient::sendRequest(const Request &request) {
 }
 
 void LlmClient::abortRequest() {
-  QNetworkReply *reply = m_currentReply;
+  // If we are inside onFinished for the current reply, we must not
+  // touch it. Defer the abort; the outer onFinished frame will see
+  // m_deferredAbort and clean up.
+  if (m_inFinished) {
+    m_deferredAbort = true;
+    m_hasQueuedRequest = false;   // queued request is now moot
+
+    qDebug() << "[LlmClient] abortRequest deferred (in finished)";
+
+    return;
+  }
+
+  QPointer<QNetworkReply> reply = m_currentReply;
 
   if (!reply) {
     return;
@@ -125,20 +151,27 @@ void LlmClient::abortRequest() {
 
   m_abortRequested = true;
 
-  reply->abort();
+  // Disconnect first so any in-flight queued signals from this reply do
+  // not reach us after we have moved on.
+  reply->disconnect(this);
 
+  reply->abort();
   reply->deleteLater();
 
   m_streamBuffer.clear();
   m_currentSseData.clear();
   m_toolCallAccumulators.clear();
 
-  qDebug() << "[LlmClient] Aborted reply=" << reply;
+  qDebug() << "[LlmClient] Aborted reply=" << reply.data();
 }
 
-bool LlmClient::isActive() const { return m_currentReply != nullptr; }
+bool LlmClient::isActive() const { return !m_currentReply.isNull(); }
 
 void LlmClient::onReadyRead() {
+  if (m_inFinished) {
+    return;
+  }
+
   auto *reply = qobject_cast<QNetworkReply *>(sender());
 
   if (!reply || reply != m_currentReply || m_requestFailed ||
@@ -254,7 +287,6 @@ void LlmClient::accumulateToolCallDelta(const QJsonArray &deltas) {
 QJsonArray LlmClient::finaliseToolCalls() const {
   QJsonArray result;
 
-  // QMap iteration is sorted by key, which preserves the model's ordering.
   for (auto it = m_toolCallAccumulators.constBegin();
        it != m_toolCallAccumulators.constEnd(); ++it) {
     const ToolCallAccumulator &accumulator = it.value();
@@ -404,18 +436,33 @@ void LlmClient::onFinished() {
     return;
   }
 
+  // If the reply is no longer current (a new request was started and
+  // this reply is stale), drop it immediately. Never touch anything
+  // else from here.
   if (reply != m_currentReply) {
     qDebug() << "[LlmClient] Ignoring stale finished reply=" << reply;
+    reply->disconnect(this);
     reply->deleteLater();
     return;
   }
 
+  // Mark reentrancy guard *before* we touch state or emit any signal.
+  // Any sendRequest/abortRequest that runs during a signal emission
+  // will queue instead of racing us.
+  m_inFinished = true;
+
+  // Detach this reply from m_currentReply immediately. From this point
+  // on, m_currentReply is null and any reentrant sendRequest will start
+  // cleanly, but we still own `reply` locally.
   m_currentReply = nullptr;
 
+  // Disconnect everything from this reply. Anything queued from it
+  // after this point will not reach us.
+  reply->disconnect(this);
+
+  // Snapshot the state we need before emitting.
   const bool aborted = m_abortRequested;
-
   const bool failed = m_requestFailed;
-
   const QNetworkReply::NetworkError error = reply->error();
 
   const int statusCode =
@@ -425,37 +472,25 @@ void LlmClient::onFinished() {
            << "failed=" << failed << "error=" << error
            << "httpStatus=" << statusCode;
 
+  // -------------------------------------------------------------------
+  // Decide what signals we will emit. We capture them into locals and
+  // reset our own state *before* emitting, so a reentrant sendRequest
+  // starts from a clean slate.
+  // -------------------------------------------------------------------
+
+  enum class Outcome { None, Finished, ToolCalls, Error };
+
+  Outcome outcome = Outcome::None;
+
+  QJsonArray toolCalls;
+  QString errorMessage;
+
   if (aborted) {
-    reply->deleteLater();
-
-    m_streamBuffer.clear();
-    m_currentSseData.clear();
-    m_toolCallAccumulators.clear();
-
-    m_abortRequested = false;
-    m_requestFailed = false;
-
-    return;
-  }
-
-  if (statusCode > 0 && (statusCode < 200 || statusCode >= 300)) {
-    m_requestFailed = true;
-
-    emit requestError(buildReplyError(reply));
-
-    reply->deleteLater();
-
-    m_streamBuffer.clear();
-    m_currentSseData.clear();
-    m_toolCallAccumulators.clear();
-
-    m_abortRequested = false;
-    m_requestFailed = false;
-
-    return;
-  }
-
-  if (!failed && error == QNetworkReply::NoError) {
+    outcome = Outcome::None;
+  } else if (statusCode > 0 && (statusCode < 200 || statusCode >= 300)) {
+    outcome = Outcome::Error;
+    errorMessage = buildReplyError(reply);
+  } else if (!failed && error == QNetworkReply::NoError) {
     consumeStreamBuffer();
 
     if (!m_streamBuffer.isEmpty()) {
@@ -472,31 +507,77 @@ void LlmClient::onFinished() {
       m_currentSseData.clear();
     }
 
-    const QJsonArray toolCalls = finaliseToolCalls();
+    toolCalls = finaliseToolCalls();
 
     if (!toolCalls.isEmpty()) {
-      emit toolCallsReceived(toolCalls);
+      outcome = Outcome::ToolCalls;
     } else {
-      emit requestFinished();
+      outcome = Outcome::Finished;
     }
-
-  } else if (!m_requestFailed) {
-    m_requestFailed = true;
-    emit requestError(buildReplyError(reply));
+  } else {
+    outcome = Outcome::Error;
+    errorMessage = buildReplyError(reply);
   }
 
-  reply->deleteLater();
-
+  // Reset all per-request state now, before any signal emission.
   m_streamBuffer.clear();
   m_currentSseData.clear();
   m_toolCallAccumulators.clear();
-
   m_abortRequested = false;
   m_requestFailed = false;
+
+  // The reply itself is done. Schedule its deletion for after we return
+  // to the event loop, so any downstream code that still holds a raw
+  // pointer to it (unlikely but possible) sees a live object during the
+  // signals below.
+  reply->deleteLater();
+
+  // Emit. Any of these emissions can cause a reentrant sendRequest or
+  // abortRequest; those will queue because m_inFinished is still true.
+  switch (outcome) {
+  case Outcome::None:
+    break;
+  case Outcome::Finished:
+    emit requestFinished();
+    break;
+  case Outcome::ToolCalls:
+    emit toolCallsReceived(toolCalls);
+    break;
+  case Outcome::Error:
+    emit requestError(errorMessage);
+    break;
+  }
+
+  // Release the guard.
+  m_inFinished = false;
+
+  // If something requested an abort during emission, honour it now.
+  if (m_deferredAbort) {
+    m_deferredAbort = false;
+
+    qDebug() << "[LlmClient] Delivering deferred abort";
+  }
+
+  // If something queued a new request during emission, deliver it now.
+  if (m_hasQueuedRequest) {
+    Request pending = m_queuedRequest;
+    m_hasQueuedRequest = false;
+    m_queuedRequest = Request();
+
+    qDebug() << "[LlmClient] Delivering queued request url=" << pending.url;
+
+    // Send it now. This runs from a fresh state and will not be
+    // reentrant with the frame above.
+    sendRequest(pending);
+  }
 }
 
 void LlmClient::onError(QNetworkReply::NetworkError error) {
   Q_UNUSED(error)
+
+  if (m_inFinished) {
+    return;
+  }
 
   auto *reply = qobject_cast<QNetworkReply *>(sender());
 

@@ -5,6 +5,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 
 class LlmClient : public QObject {
@@ -112,18 +113,18 @@ private:
 
   QString buildReplyError(QNetworkReply *reply) const;
 
+  // Drains any request that was queued during a signal emission.
+  void deliverQueuedRequest();
+
 private:
   QNetworkAccessManager *m_networkManager = nullptr;
 
-  QNetworkReply *m_currentReply = nullptr;
+  QPointer<QNetworkReply> m_currentReply;
 
   QByteArray m_streamBuffer;
 
   QByteArray m_currentSseData;
 
-  // Tool-call fragments accumulated across SSE deltas, keyed by the
-  // "index" field the API assigns. Each entry holds id, name, and the
-  // accumulated arguments string.
   struct ToolCallAccumulator {
     QString id;
     QString name;
@@ -134,4 +135,20 @@ private:
   bool m_requestFailed = false;
 
   bool m_abortRequested = false;
+
+  // True while we are executing onFinished. Used to make sendRequest and
+  // abortRequest reentrancy-safe: a request started from inside a
+  // finished/toolCalls/error slot must be queued, not applied
+  // immediately, because the outer onFinished frame still owns the
+  // current reply.
+  bool m_inFinished = false;
+
+  // A request queued while m_inFinished was true. Applied when the outer
+  // onFinished frame returns.
+  bool m_hasQueuedRequest = false;
+  Request m_queuedRequest;
+
+  // Set when abortRequest() is called while m_inFinished is true. The
+  // outer onFinished frame honours it before returning.
+  bool m_deferredAbort = false;
 };
