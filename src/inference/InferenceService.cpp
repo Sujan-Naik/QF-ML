@@ -268,31 +268,28 @@ bool InferenceService::setLlmConfig(const LlmConfig &config) {
   QString validationError;
 
   if (!validateLlmConfig(config, &validationError)) {
-    emit llmError(m_activeToken, validationError);
+    emit llmError(QUuid(), validationError);
     return false;
   }
 
-  // Any in-flight request is invalidated by a config change.
-  abortActiveChatRequest();
+  abortAllChatRequests();
 
   m_llmConfig = config;
 
   emit llmConfigurationChanged();
 
-  if (!m_initialized) {
+  if (!m_initialized)
     return true;
-  }
 
-  if (m_llmConfig.mode == LlmMode::Remote) {
+  if (m_llmConfig.mode == LlmMode::Remote)
     return configureRemoteLlm();
-  }
 
   m_llmReady = false;
   m_llmEndpoint.clear();
   m_llmModel.clear();
 
   if (!startSelectedLlmModel()) {
-    emit llmError(m_activeToken,
+    emit llmError(QUuid(),
                   QStringLiteral("Unable to start the selected local LLM model."));
     return false;
   }
@@ -472,225 +469,98 @@ bool InferenceService::startSelectedLlmModel() {
 InferenceService::RequestToken InferenceService::sendChatRequest(
     const QJsonArray &messages, const QString &model, double temperature,
     int timeoutMs, const QString &grammar, const QJsonObject &responseFormat,
-    const QJsonArray &tools, RequestPolicy policy) {
-  PendingRequest pending;
-
-  pending.token = QUuid::createUuid();
-  pending.messages = messages;
-  pending.model = model;
-  pending.temperature = temperature;
-  pending.timeoutMs = timeoutMs;
-  pending.grammar = grammar;
-  pending.responseFormat = responseFormat;
-  pending.tools = tools;
-
+    const QJsonArray &tools, const QString &sessionId) {
   if (!m_llmClient) {
-    emit llmError(pending.token,
-                  QStringLiteral("LLM client is unavailable."));
-    return pending.token;
+    const RequestToken token = QUuid::createUuid();
+    emit llmError(token, QStringLiteral("LLM client is unavailable."));
+    return token;
   }
 
   if (m_llmEndpoint.isEmpty()) {
-    emit llmError(pending.token,
-                  QStringLiteral("No LLM endpoint is configured."));
-    return pending.token;
+    const RequestToken token = QUuid::createUuid();
+    emit llmError(token, QStringLiteral("No LLM endpoint is configured."));
+    return token;
   }
 
   if (!m_llmReady) {
-    emit llmError(pending.token,
-                  QStringLiteral("LLM service is not ready."));
-    return pending.token;
-  }
-
-  if (!m_activeToken.isNull()) {
-    if (policy == RequestPolicy::Abort) {
-      qDebug() << "[InferenceService] New request aborts active token="
-               << m_activeToken.toString();
-      abortActiveChatRequest();
-    } else {
-      qDebug() << "[InferenceService] Queueing request behind token="
-               << m_activeToken.toString();
-      m_requestQueue.enqueue(pending);
-      return pending.token;
-    }
-  }
-
-  dispatchPendingRequest(pending);
-  return pending.token;
-}
-
-void InferenceService::dispatchPendingRequest(const PendingRequest &pending) {
-  if (!m_llmClient) {
-    emit llmError(pending.token,
-                  QStringLiteral("LLM client is unavailable."));
-    return;
+    const RequestToken token = QUuid::createUuid();
+    emit llmError(token, QStringLiteral("LLM service is not ready."));
+    return token;
   }
 
   LlmClient::Request request;
 
   request.url = m_llmEndpoint;
-  request.model = pending.model.isEmpty() ? m_llmModel : pending.model;
-  request.messages = pending.messages;
-  request.temperature = pending.temperature;
-  request.timeoutMs = pending.timeoutMs;
+  request.model = model.isEmpty() ? m_llmModel : model;
+  request.messages = messages;
+  request.temperature = temperature;
+  request.timeoutMs = timeoutMs;
+  request.sessionId = sessionId;
 
-  if (m_llmConfig.mode == LlmMode::Local) {
-    request.grammar = pending.grammar;
-  }
+  if (m_llmConfig.mode == LlmMode::Local)
+    request.grammar = grammar;
 
-  if (m_llmConfig.mode == LlmMode::Remote) {
-    request.responseFormat = pending.responseFormat;
-  }
+  if (m_llmConfig.mode == LlmMode::Remote)
+    request.responseFormat = responseFormat;
 
-  request.tools = pending.tools;
+  request.tools = tools;
 
   if (m_llmConfig.mode == LlmMode::Remote) {
     request.authType = m_llmConfig.authType == LlmAuthType::Bearer
                            ? LlmClient::AuthType::Bearer
                            : LlmClient::AuthType::None;
-
     request.apiKey = m_llmConfig.apiKey;
   }
 
-  m_activeToken = pending.token;
-
   qDebug() << "[InferenceService] Dispatching chat request"
-           << "token=" << pending.token.toString()
            << "mode="
            << (m_llmConfig.mode == LlmMode::Local ? QStringLiteral("local")
                                                   : QStringLiteral("remote"))
            << "model=" << request.model
            << "messages=" << request.messages.size()
-           << "temperature=" << request.temperature
-           << "timeoutMs=" << request.timeoutMs
-           << "hasGrammar=" << !request.grammar.isEmpty()
-           << "hasResponseFormat=" << !request.responseFormat.isEmpty()
            << "toolCount=" << request.tools.size()
-           << "authenticated="
-           << (request.authType == LlmClient::AuthType::Bearer &&
-               !request.apiKey.isEmpty());
+           << "sessionId=" << request.sessionId;
 
-  emit activeRequestChanged(m_activeToken);
-
-  m_llmClient->sendRequest(request);
+  return m_llmClient->sendRequest(request);
 }
-
 void InferenceService::abortChatRequest(const RequestToken &token) {
-  if (token.isNull() || token != m_activeToken) {
-    // Also remove a queued request matching this token, if any.
-    for (int i = 0; i < m_requestQueue.size(); ++i) {
-      if (m_requestQueue.at(i).token == token) {
-        m_requestQueue.removeAt(i);
-        qDebug() << "[InferenceService] Removed queued token="
-                 << token.toString();
-        return;
-      }
-    }
-    return;
-  }
-
-  if (m_llmClient) {
-    m_llmClient->abortRequest();
-  }
-
-  // The LlmClient will call back into onClientFinished with an aborted
-  // outcome, which will clear m_activeToken and pump the queue.
+  if (m_llmClient)
+    m_llmClient->abortRequest(token);
 }
 
-void InferenceService::abortActiveChatRequest() {
-  if (m_activeToken.isNull()) {
-    return;
-  }
-
-  if (m_llmClient) {
-    m_llmClient->abortRequest();
-  }
+void InferenceService::abortAllChatRequests() {
+  if (m_llmClient)
+    m_llmClient->abortAllRequests();
 }
 
 bool InferenceService::isRequestActive(const RequestToken &token) const {
-  return !token.isNull() && token == m_activeToken;
+  return m_llmClient && m_llmClient->isActive(token);
+}
+
+bool InferenceService::hasActiveRequests() const {
+  return m_llmClient && m_llmClient->hasActiveRequests();
 }
 
 bool InferenceService::isLlmReady() const { return m_llmReady; }
 
-void InferenceService::onClientDelta(const QString &text) {
-  if (m_activeToken.isNull()) {
-    return;
-  }
-
-  emit llmDelta(m_activeToken, text);
+void InferenceService::onClientDelta(const LlmClient::Token &token,
+                                     const QString &text) {
+  emit llmDelta(token, text);
 }
 
-void InferenceService::onClientFinished() {
-  if (m_activeToken.isNull()) {
-    return;
-  }
-
-  const RequestToken finishedToken = m_activeToken;
-
-  // Clear the active token *before* emitting. If a slot issues a new
-  // sendChatRequest reentrantly, it will see an idle service and
-  // dispatch immediately rather than aborting the token we are about to
-  // report as finished.
-  m_activeToken = QUuid();
-  emit activeRequestChanged(m_activeToken);
-
-  emit llmFinished(finishedToken);
-
-  pumpRequestQueue();
+void InferenceService::onClientFinished(const LlmClient::Token &token) {
+  emit llmFinished(token);
 }
 
-void InferenceService::onClientToolCalls(const QJsonArray &toolCalls) {
-  if (m_activeToken.isNull()) {
-    return;
-  }
-
-  const RequestToken finishedToken = m_activeToken;
-
-  m_activeToken = QUuid();
-  emit activeRequestChanged(m_activeToken);
-
-  emit llmToolCalls(finishedToken, toolCalls);
-
-  pumpRequestQueue();
+void InferenceService::onClientToolCalls(const LlmClient::Token &token,
+                                         const QJsonArray &toolCalls) {
+  emit llmToolCalls(token, toolCalls);
 }
 
-void InferenceService::onClientError(const QString &error) {
-  if (m_activeToken.isNull()) {
-    return;
-  }
-
-  const RequestToken failedToken = m_activeToken;
-
-  m_activeToken = QUuid();
-  emit activeRequestChanged(m_activeToken);
-
-  emit llmError(failedToken, error);
+void InferenceService::onClientError(const LlmClient::Token &token,
+                                     const QString &error) {
+  emit llmError(token, error);
   emit serviceError(error);
-
-  pumpRequestQueue();
-}
-
-void InferenceService::pumpRequestQueue() {
-  // Only pump if nothing is active. A reentrant sendChatRequest from a
-  // signal slot above may already have dispatched a new request; in that
-  // case the queue waits its turn.
-  if (!m_activeToken.isNull()) {
-    return;
-  }
-
-  if (m_requestQueue.isEmpty()) {
-    return;
-  }
-
-  // Defer one event-loop turn so the current signal emission unwinds
-  // completely before we start the next request.
-  QTimer::singleShot(0, this, [this]() {
-    if (m_activeToken.isNull() && !m_requestQueue.isEmpty()) {
-      const PendingRequest next = m_requestQueue.dequeue();
-      dispatchPendingRequest(next);
-    }
-  });
 }
 
 void InferenceService::onLlmServerReady() {
@@ -707,13 +577,12 @@ void InferenceService::onLlmServerReady() {
 }
 
 void InferenceService::onLlamaError(const QString &error) {
-  if (m_llmConfig.mode != LlmMode::Local) {
+  if (m_llmConfig.mode != LlmMode::Local)
     return;
-  }
 
   m_llmReady = false;
 
-  emit llmError(m_activeToken, error);
+  emit llmError(QUuid(), error);
   emit serviceError(error);
 }
 

@@ -4,51 +4,49 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QTimer>
 #include <QUrl>
 
 LlmClient::LlmClient(QNetworkAccessManager *networkManager, QObject *parent)
     : QObject(parent), m_networkManager(networkManager) {}
 
-void LlmClient::sendRequest(const Request &request) {
-  // If we are currently inside onFinished, do not touch m_currentReply
-  // here: the outer frame still owns it and will clean up when it
-  // returns. Queue the request and let onFinished deliver it.
-  if (m_inFinished) {
-    m_queuedRequest = request;
-    m_hasQueuedRequest = true;
+bool LlmClient::isCompleteJson(const QByteArray &payload) {
+  QJsonParseError parseError;
 
-    qDebug() << "[LlmClient] Queued request (reentrant) url=" << request.url
-             << "model=" << request.model;
+  const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
 
-    return;
-  }
+  if (parseError.error != QJsonParseError::NoError)
+    return false;
 
-  abortRequest();
+  return doc.isObject() || doc.isArray();
+}
+
+LlmClient::Token LlmClient::sendRequest(const Request &request) {
+  const Token token = QUuid::createUuid();
 
   if (!m_networkManager) {
-    emit requestError(QStringLiteral("LLM network manager is unavailable."));
-    return;
+    emit requestError(token,
+                      QStringLiteral("LLM network manager is unavailable."));
+    return token;
   }
 
   QUrl url(request.url);
 
-  if (url.scheme().isEmpty()) {
+  if (url.scheme().isEmpty())
     url.setScheme(QStringLiteral("http"));
-  }
 
   if (!url.isValid() || url.isEmpty()) {
     emit requestError(
-        QStringLiteral("Invalid LLM URL: %1").arg(url.errorString()));
-    return;
+        token, QStringLiteral("Invalid LLM URL: %1").arg(url.errorString()));
+    return token;
   }
 
   if (url.host().isEmpty()) {
     emit requestError(
-        QStringLiteral("LLM URL has no host: %1").arg(request.url));
-    return;
+        token, QStringLiteral("LLM URL has no host: %1").arg(request.url));
+    return token;
   }
 
   QNetworkRequest networkRequest(url);
@@ -60,7 +58,7 @@ void LlmClient::sendRequest(const Request &request) {
                               QByteArrayLiteral("text/event-stream"));
 
   networkRequest.setHeader(QNetworkRequest::UserAgentHeader,
-                           QStringLiteral("TalosApp/1.0"));
+                           QStringLiteral("LoreApp/1.0"));
 
   networkRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                               QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -76,154 +74,218 @@ void LlmClient::sendRequest(const Request &request) {
   QJsonObject body;
 
   body.insert(QStringLiteral("model"), request.model);
-
   body.insert(QStringLiteral("messages"), request.messages);
-
   body.insert(QStringLiteral("stream"), true);
-
   body.insert(QStringLiteral("temperature"), request.temperature);
 
-  if (!request.grammar.isEmpty()) {
+  if (!request.grammar.isEmpty())
     body.insert(QStringLiteral("grammar"), request.grammar);
-  }
 
-  if (!request.responseFormat.isEmpty()) {
+  if (!request.responseFormat.isEmpty())
     body.insert(QStringLiteral("response_format"), request.responseFormat);
-  }
 
   if (!request.tools.isEmpty()) {
     body.insert(QStringLiteral("tools"), request.tools);
     body.insert(QStringLiteral("tool_choice"), QStringLiteral("auto"));
   }
 
-  m_streamBuffer.clear();
-  m_currentSseData.clear();
-  m_toolCallAccumulators.clear();
+  if (!request.sessionId.isEmpty())
+    body.insert(QStringLiteral("session_id"), request.sessionId);
 
-  m_requestFailed = false;
-
-  m_abortRequested = false;
+  ReplyState state;
 
   QNetworkReply *reply = m_networkManager->post(
       networkRequest, QJsonDocument(body).toJson(QJsonDocument::Compact));
 
-  m_currentReply = reply;
+  state.reply = reply;
+
+  m_states.insert(token, state);
+  m_replyToToken.insert(reply, token);
 
   connect(reply, &QNetworkReply::readyRead, this, &LlmClient::onReadyRead);
-
   connect(reply, &QNetworkReply::finished, this, &LlmClient::onFinished);
-
   connect(
       reply,
       QOverload<QNetworkReply::NetworkError>::of(&QNetworkReply::errorOccurred),
       this, &LlmClient::onError);
 
   qDebug() << "[LlmClient] POST started"
-           << "reply=" << reply << "url=" << url << "model=" << request.model
-           << "authenticated="
-           << (request.authType == AuthType::Bearer &&
-               !request.apiKey.isEmpty())
-           << "hasGrammar=" << !request.grammar.isEmpty()
-           << "hasResponseFormat=" << !request.responseFormat.isEmpty()
-           << "toolCount=" << request.tools.size();
+           << "token=" << token << "reply=" << reply << "url=" << url
+           << "model=" << request.model
+           << "sessionId=" << request.sessionId;
+
+  return token;
 }
 
-void LlmClient::abortRequest() {
-  // If we are inside onFinished for the current reply, we must not
-  // touch it. Defer the abort; the outer onFinished frame will see
-  // m_deferredAbort and clean up.
-  if (m_inFinished) {
-    m_deferredAbort = true;
-    m_hasQueuedRequest = false;   // queued request is now moot
+void LlmClient::abortRequest(const Token &token) {
+  auto it = m_states.find(token);
 
-    qDebug() << "[LlmClient] abortRequest deferred (in finished)";
-
+  if (it == m_states.end())
     return;
+
+  ReplyState &state = it.value();
+
+  state.abortRequested = true;
+
+  QNetworkReply *reply = state.reply;
+
+  if (reply) {
+    reply->disconnect(this);
+    reply->abort();
+    reply->deleteLater();
+    m_replyToToken.remove(reply);
   }
 
-  QPointer<QNetworkReply> reply = m_currentReply;
+  m_states.erase(it);
 
-  if (!reply) {
-    return;
-  }
-
-  m_currentReply = nullptr;
-
-  m_abortRequested = true;
-
-  // Disconnect first so any in-flight queued signals from this reply do
-  // not reach us after we have moved on.
-  reply->disconnect(this);
-
-  reply->abort();
-  reply->deleteLater();
-
-  m_streamBuffer.clear();
-  m_currentSseData.clear();
-  m_toolCallAccumulators.clear();
-
-  qDebug() << "[LlmClient] Aborted reply=" << reply.data();
+  qDebug() << "[LlmClient] Aborted token=" << token;
 }
 
-bool LlmClient::isActive() const { return !m_currentReply.isNull(); }
+void LlmClient::abortAllRequests() {
+  const QList<Token> tokens = m_states.keys();
+
+  for (const Token &token : tokens)
+    abortRequest(token);
+}
+
+bool LlmClient::isActive(const Token &token) const {
+  return m_states.contains(token);
+}
+
+LlmClient::ReplyState *LlmClient::stateFor(QNetworkReply *reply) {
+  if (!reply)
+    return nullptr;
+
+  auto it = m_replyToToken.find(reply);
+
+  if (it == m_replyToToken.end())
+    return nullptr;
+
+  auto sit = m_states.find(it.value());
+
+  if (sit == m_states.end())
+    return nullptr;
+
+  return &sit.value();
+}
+
+const LlmClient::ReplyState *LlmClient::stateFor(QNetworkReply *reply) const {
+  return const_cast<LlmClient *>(this)->stateFor(reply);
+}
 
 void LlmClient::onReadyRead() {
-  if (m_inFinished) {
-    return;
-  }
-
   auto *reply = qobject_cast<QNetworkReply *>(sender());
 
-  if (!reply || reply != m_currentReply || m_requestFailed ||
-      m_abortRequested) {
+  if (!reply)
     return;
-  }
+
+  ReplyState *state = stateFor(reply);
+
+  if (!state || state->requestFailed || state->abortRequested)
+    return;
 
   const QByteArray data = reply->readAll();
 
-  if (data.isEmpty()) {
+  if (data.isEmpty())
     return;
-  }
 
-  m_streamBuffer.append(data);
+  state->streamBuffer.append(data);
 
-  consumeStreamBuffer();
+  consumeStreamBuffer(*state);
 }
 
-void LlmClient::consumeStreamBuffer() {
+void LlmClient::consumeStreamBuffer(ReplyState &state) {
   while (true) {
-    const int lineEndIndex = m_streamBuffer.indexOf('\n');
+    const int lineEndIndex = state.streamBuffer.indexOf('\n');
 
-    if (lineEndIndex == -1) {
+    if (lineEndIndex == -1)
       break;
-    }
 
     int lineLength = lineEndIndex;
 
-    if (lineLength > 0 && m_streamBuffer.at(lineLength - 1) == '\r') {
+    if (lineLength > 0 && state.streamBuffer.at(lineLength - 1) == '\r')
       lineLength--;
-    }
 
-    const QByteArray line = m_streamBuffer.left(lineLength);
+    const QByteArray line = state.streamBuffer.left(lineLength);
 
-    m_streamBuffer.remove(0, lineEndIndex + 1);
+    state.streamBuffer.remove(0, lineEndIndex + 1);
 
-    processSseLine(line);
+    processSseLine(state, line);
   }
 }
 
-void LlmClient::processSseLine(const QByteArray &line) {
+void LlmClient::flushStreamBuffer(ReplyState &state, const Token &token) {
+  // A well-formed SSE stream ends with a newline, so consumeStreamBuffer
+  // normally leaves nothing behind. If the buffer is non-empty here, the
+  // stream ended mid-message. Split out any complete "data:" fields that
+  // are present (they can be present if the final chunk contained more
+  // than one field and no trailing newline), dispatch them, and then
+  // treat whatever remains as a single final data field so the last
+  // content delta is not lost.
+  while (!state.streamBuffer.isEmpty()) {
+    const int newlineIndex = state.streamBuffer.indexOf('\n');
+
+    if (newlineIndex == -1)
+      break;
+
+    int lineLength = newlineIndex;
+
+    if (lineLength > 0 && state.streamBuffer.at(lineLength - 1) == '\r')
+      lineLength--;
+
+    const QByteArray line = state.streamBuffer.left(lineLength);
+
+    state.streamBuffer.remove(0, newlineIndex + 1);
+
+    processSseLine(state, line);
+  }
+
+  if (!state.streamBuffer.isEmpty()) {
+    QByteArray remaining = state.streamBuffer;
+
+    state.streamBuffer.clear();
+
+    if (remaining.endsWith('\r'))
+      remaining.chop(1);
+
+    // If the remainder is a single "data:" field, feed it through the
+    // normal parser so its JSON is dispatched. If it is a bare JSON
+    // payload without the SSE prefix, dispatch it directly.
+    if (remaining.startsWith("data:")) {
+      processSseLine(state, remaining);
+    } else if (!remaining.trimmed().isEmpty()) {
+      dispatchSseMessage(token, state, remaining);
+    }
+  }
+
+  if (!state.currentSseData.isEmpty()) {
+    dispatchSseMessage(token, state, state.currentSseData);
+    state.currentSseData.clear();
+  }
+}
+
+void LlmClient::processSseLine(ReplyState &state, const QByteArray &line) {
   if (line.isEmpty()) {
-    if (!m_currentSseData.isEmpty()) {
-      dispatchSseMessage(m_currentSseData);
-      m_currentSseData.clear();
+    if (!state.currentSseData.isEmpty()) {
+      QNetworkReply *reply = state.reply;
+
+      if (!reply)
+        return;
+
+      auto it = m_replyToToken.find(reply);
+
+      if (it == m_replyToToken.end())
+        return;
+
+      dispatchSseMessage(it.value(), state, state.currentSseData);
+
+      state.currentSseData.clear();
     }
     return;
   }
 
-  if (line.startsWith(':')) {
+  if (line.startsWith(':'))
     return;
-  }
 
   const int colonIndex = line.indexOf(':');
 
@@ -233,37 +295,35 @@ void LlmClient::processSseLine(const QByteArray &line) {
   if (colonIndex != -1) {
     fieldName = line.left(colonIndex);
     fieldValue = line.mid(colonIndex + 1);
-    if (fieldValue.startsWith(' ')) {
+    if (fieldValue.startsWith(' '))
       fieldValue.remove(0, 1);
-    }
   } else {
     fieldName = line;
   }
 
   if (fieldName == "data") {
-    if (!m_currentSseData.isEmpty()) {
-      m_currentSseData.append('\n');
-    }
-    m_currentSseData.append(fieldValue);
+    if (!state.currentSseData.isEmpty())
+      state.currentSseData.append('\n');
+
+    state.currentSseData.append(fieldValue);
   }
 }
 
-void LlmClient::accumulateToolCallDelta(const QJsonArray &deltas) {
+void LlmClient::accumulateToolCallDelta(ReplyState &state,
+                                        const QJsonArray &deltas) {
   for (const QJsonValue &value : deltas) {
-    if (!value.isObject()) {
+    if (!value.isObject())
       continue;
-    }
 
     const QJsonObject delta = value.toObject();
 
     const int index = delta.value(QStringLiteral("index")).toInt(0);
 
-    ToolCallAccumulator &accumulator = m_toolCallAccumulators[index];
+    ToolCallAccumulator &accumulator = state.toolCallAccumulators[index];
 
     const QString id = delta.value(QStringLiteral("id")).toString();
-    if (!id.isEmpty()) {
+    if (!id.isEmpty())
       accumulator.id = id;
-    }
 
     const QJsonObject function =
         delta.value(QStringLiteral("function")).toObject();
@@ -271,29 +331,26 @@ void LlmClient::accumulateToolCallDelta(const QJsonArray &deltas) {
     if (!function.isEmpty()) {
       const QString name =
           function.value(QStringLiteral("name")).toString();
-      if (!name.isEmpty()) {
+      if (!name.isEmpty())
         accumulator.name = name;
-      }
 
       const QString arguments =
           function.value(QStringLiteral("arguments")).toString();
-      if (!arguments.isEmpty()) {
+      if (!arguments.isEmpty())
         accumulator.arguments += arguments;
-      }
     }
   }
 }
 
-QJsonArray LlmClient::finaliseToolCalls() const {
+QJsonArray LlmClient::finaliseToolCalls(const ReplyState &state) const {
   QJsonArray result;
 
-  for (auto it = m_toolCallAccumulators.constBegin();
-       it != m_toolCallAccumulators.constEnd(); ++it) {
+  for (auto it = state.toolCallAccumulators.constBegin();
+       it != state.toolCallAccumulators.constEnd(); ++it) {
     const ToolCallAccumulator &accumulator = it.value();
 
-    if (accumulator.name.isEmpty()) {
+    if (accumulator.name.isEmpty())
       continue;
-    }
 
     QJsonObject function;
     function.insert(QStringLiteral("name"), accumulator.name);
@@ -313,14 +370,15 @@ QJsonArray LlmClient::finaliseToolCalls() const {
   return result;
 }
 
-void LlmClient::dispatchSseMessage(const QByteArray &rawPayload) {
+void LlmClient::dispatchSseMessage(const Token &token, ReplyState &state,
+                                   const QByteArray &rawPayload) {
   const QByteArray payload = rawPayload.trimmed();
 
-  if (payload.isEmpty()) {
+  if (payload.isEmpty())
     return;
-  }
 
   if (payload == "[DONE]") {
+    state.sawDoneSentinel = true;
     return;
   }
 
@@ -334,50 +392,66 @@ void LlmClient::dispatchSseMessage(const QByteArray &rawPayload) {
     return;
   }
 
-  if (!document.isObject()) {
+  if (!document.isObject())
     return;
-  }
 
   const QJsonObject root = document.object();
 
-  const QJsonValue choicesValue = root.value(QStringLiteral("choices"));
+  // Some providers deliver errors as an "error" object inside the SSE
+  // stream rather than as an HTTP status. Surface them as requestError.
+  const QJsonObject errorObject =
+      root.value(QStringLiteral("error")).toObject();
 
-  if (!choicesValue.isArray()) {
+  if (!errorObject.isEmpty()) {
+    const QString message =
+        errorObject.value(QStringLiteral("message")).toString();
+
+    state.requestFailed = true;
+
+    emit requestError(token,
+                      message.isEmpty()
+                          ? QStringLiteral("Provider reported an error "
+                                           "mid-stream.")
+                          : message);
     return;
   }
+
+  const QJsonValue choicesValue = root.value(QStringLiteral("choices"));
+
+  if (!choicesValue.isArray())
+    return;
 
   const QJsonArray choices = choicesValue.toArray();
 
-  if (choices.isEmpty()) {
+  if (choices.isEmpty())
     return;
-  }
 
   const QJsonObject choice = choices.first().toObject();
 
   QJsonObject delta = choice.value(QStringLiteral("delta")).toObject();
 
-  if (delta.isEmpty()) {
+  if (delta.isEmpty())
     delta = choice.value(QStringLiteral("message")).toObject();
-  }
 
   const QString content = delta.value(QStringLiteral("content")).toString();
 
   if (!content.isEmpty()) {
-    emit deltaReceived(content);
+    state.receivedAnyDelta = true;
+    emit deltaReceived(token, content);
   }
 
   const QJsonValue toolCallsValue =
       delta.value(QStringLiteral("tool_calls"));
 
-  if (toolCallsValue.isArray()) {
-    accumulateToolCallDelta(toolCallsValue.toArray());
+  if (toolCallsValue.isArray() && !toolCallsValue.toArray().isEmpty()) {
+    state.receivedAnyDelta = true;
+    accumulateToolCallDelta(state, toolCallsValue.toArray());
   }
 }
 
 QString LlmClient::buildReplyError(QNetworkReply *reply) const {
-  if (!reply) {
+  if (!reply)
     return QStringLiteral("LLM request failed.");
-  }
 
   const int statusCode =
       reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -398,33 +472,28 @@ QString LlmClient::buildReplyError(QNetworkReply *reply) const {
 
     if (!errorObject.isEmpty()) {
       message = errorObject.value(QStringLiteral("message")).toString();
-      if (message.isEmpty()) {
+      if (message.isEmpty())
         message = errorObject.value(QStringLiteral("detail")).toString();
-      }
     }
 
-    if (message.isEmpty()) {
+    if (message.isEmpty())
       message = root.value(QStringLiteral("message")).toString();
-    }
   }
 
-  if (message.isEmpty()) {
+  if (message.isEmpty())
     message = QString::fromUtf8(body).trimmed();
-  }
 
   QString result = QStringLiteral("LLM request failed");
 
-  if (statusCode > 0) {
+  if (statusCode > 0)
     result += QStringLiteral(" (HTTP %1)").arg(statusCode);
-  }
 
   const QString networkError = reply->errorString().trimmed();
 
-  if (!message.isEmpty()) {
+  if (!message.isEmpty())
     result += QStringLiteral(": ") + message;
-  } else if (!networkError.isEmpty()) {
+  else if (!networkError.isEmpty())
     result += QStringLiteral(": ") + networkError;
-  }
 
   return result;
 }
@@ -432,167 +501,131 @@ QString LlmClient::buildReplyError(QNetworkReply *reply) const {
 void LlmClient::onFinished() {
   auto *reply = qobject_cast<QNetworkReply *>(sender());
 
-  if (!reply) {
+  if (!reply)
     return;
-  }
 
-  // If the reply is no longer current (a new request was started and
-  // this reply is stale), drop it immediately. Never touch anything
-  // else from here.
-  if (reply != m_currentReply) {
-    qDebug() << "[LlmClient] Ignoring stale finished reply=" << reply;
-    reply->disconnect(this);
+  auto tokenIt = m_replyToToken.find(reply);
+
+  if (tokenIt == m_replyToToken.end()) {
     reply->deleteLater();
     return;
   }
 
-  // Mark reentrancy guard *before* we touch state or emit any signal.
-  // Any sendRequest/abortRequest that runs during a signal emission
-  // will queue instead of racing us.
-  m_inFinished = true;
+  const Token token = tokenIt.value();
 
-  // Detach this reply from m_currentReply immediately. From this point
-  // on, m_currentReply is null and any reentrant sendRequest will start
-  // cleanly, but we still own `reply` locally.
-  m_currentReply = nullptr;
+  auto stateIt = m_states.find(token);
 
-  // Disconnect everything from this reply. Anything queued from it
-  // after this point will not reach us.
-  reply->disconnect(this);
+  if (stateIt == m_states.end()) {
+    m_replyToToken.remove(reply);
+    reply->deleteLater();
+    return;
+  }
 
-  // Snapshot the state we need before emitting.
-  const bool aborted = m_abortRequested;
-  const bool failed = m_requestFailed;
+  // Drain any bytes the reply still holds before the state is copied
+  // out and the reply is torn down. On most Qt builds readyRead has
+  // already consumed everything, so this is usually a no-op, but if the
+  // final TCP segment delivered the last content frame together with
+  // the [DONE] sentinel, those bytes are still in the reply here and
+  // would otherwise be discarded with the reply.
+  const QByteArray tail = reply->readAll();
+
+  ReplyState state = stateIt.value();
+
+  if (!tail.isEmpty())
+    state.streamBuffer.append(tail);
+
+  const bool aborted = state.abortRequested;
+  const bool failed = state.requestFailed;
   const QNetworkReply::NetworkError error = reply->error();
 
   const int statusCode =
       reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
-  qDebug() << "[LlmClient] Finished reply=" << reply << "aborted=" << aborted
-           << "failed=" << failed << "error=" << error
-           << "httpStatus=" << statusCode;
+  qDebug() << "[LlmClient] Finished token=" << token
+           << "aborted=" << aborted << "failed=" << failed
+           << "error=" << error << "httpStatus=" << statusCode
+           << "receivedAnyDelta=" << state.receivedAnyDelta
+           << "sawDoneSentinel=" << state.sawDoneSentinel;
 
-  // -------------------------------------------------------------------
-  // Decide what signals we will emit. We capture them into locals and
-  // reset our own state *before* emitting, so a reentrant sendRequest
-  // starts from a clean slate.
-  // -------------------------------------------------------------------
+  m_replyToToken.remove(reply);
+  m_states.remove(token);
 
-  enum class Outcome { None, Finished, ToolCalls, Error };
-
-  Outcome outcome = Outcome::None;
-
-  QJsonArray toolCalls;
-  QString errorMessage;
-
-  if (aborted) {
-    outcome = Outcome::None;
-  } else if (statusCode > 0 && (statusCode < 200 || statusCode >= 300)) {
-    outcome = Outcome::Error;
-    errorMessage = buildReplyError(reply);
-  } else if (!failed && error == QNetworkReply::NoError) {
-    consumeStreamBuffer();
-
-    if (!m_streamBuffer.isEmpty()) {
-      QByteArray remaining = m_streamBuffer;
-      m_streamBuffer.clear();
-      if (remaining.endsWith('\r')) {
-        remaining.chop(1);
-      }
-      processSseLine(remaining);
-    }
-
-    if (!m_currentSseData.isEmpty()) {
-      dispatchSseMessage(m_currentSseData);
-      m_currentSseData.clear();
-    }
-
-    toolCalls = finaliseToolCalls();
-
-    if (!toolCalls.isEmpty()) {
-      outcome = Outcome::ToolCalls;
-    } else {
-      outcome = Outcome::Finished;
-    }
-  } else {
-    outcome = Outcome::Error;
-    errorMessage = buildReplyError(reply);
-  }
-
-  // Reset all per-request state now, before any signal emission.
-  m_streamBuffer.clear();
-  m_currentSseData.clear();
-  m_toolCallAccumulators.clear();
-  m_abortRequested = false;
-  m_requestFailed = false;
-
-  // The reply itself is done. Schedule its deletion for after we return
-  // to the event loop, so any downstream code that still holds a raw
-  // pointer to it (unlikely but possible) sees a live object during the
-  // signals below.
+  reply->disconnect(this);
   reply->deleteLater();
 
-  // Emit. Any of these emissions can cause a reentrant sendRequest or
-  // abortRequest; those will queue because m_inFinished is still true.
-  switch (outcome) {
-  case Outcome::None:
-    break;
-  case Outcome::Finished:
-    emit requestFinished();
-    break;
-  case Outcome::ToolCalls:
-    emit toolCallsReceived(toolCalls);
-    break;
-  case Outcome::Error:
-    emit requestError(errorMessage);
-    break;
+  if (aborted)
+    return;
+
+  if (statusCode > 0 && (statusCode < 200 || statusCode >= 300)) {
+    emit requestError(token, buildReplyError(reply));
+    return;
   }
 
-  // Release the guard.
-  m_inFinished = false;
+  if (!failed && error == QNetworkReply::NoError) {
+    // Consume any complete lines still in the buffer, then flush
+    // whatever partial message remains so the final content delta is
+    // not lost when the stream did not end with a newline.
+    consumeStreamBuffer(state);
+    flushStreamBuffer(state, token);
 
-  // If something requested an abort during emission, honour it now.
-  if (m_deferredAbort) {
-    m_deferredAbort = false;
+    if (state.requestFailed) {
+      // dispatchSseMessage already emitted requestError.
+      return;
+    }
 
-    qDebug() << "[LlmClient] Delivering deferred abort";
+    const QJsonArray toolCalls = finaliseToolCalls(state);
+
+    if (!toolCalls.isEmpty()) {
+      emit toolCallsReceived(token, toolCalls);
+      return;
+    }
+
+    // The stream must have produced content. If it did not, the
+    // provider closed the connection without sending anything.
+    if (!state.receivedAnyDelta) {
+      emit requestError(
+          token,
+          QStringLiteral("The LLM provider closed the stream without "
+                         "sending any content. This is usually a "
+                         "transient server-side failure. Retry."));
+      return;
+    }
+
+    // OpenRouter and other OpenAI-compatible providers terminate the
+    // SSE stream with a "data: [DONE]" sentinel. If the sentinel never
+    // arrived, the stream was truncated mid-generation. Treat that as
+    // an error rather than a clean finish, because the accumulated
+    // content is incomplete.
+    if (!state.sawDoneSentinel) {
+      emit requestError(
+          token,
+          QStringLiteral("The LLM stream ended without a [DONE] sentinel. "
+                         "This means the response was truncated. Retry."));
+      return;
+    }
+
+    emit requestFinished(token);
+    return;
   }
 
-  // If something queued a new request during emission, deliver it now.
-  if (m_hasQueuedRequest) {
-    Request pending = m_queuedRequest;
-    m_hasQueuedRequest = false;
-    m_queuedRequest = Request();
-
-    qDebug() << "[LlmClient] Delivering queued request url=" << pending.url;
-
-    // Send it now. This runs from a fresh state and will not be
-    // reentrant with the frame above.
-    sendRequest(pending);
-  }
+  emit requestError(token, buildReplyError(reply));
 }
 
 void LlmClient::onError(QNetworkReply::NetworkError error) {
-  Q_UNUSED(error)
-
-  if (m_inFinished) {
-    return;
-  }
+  Q_UNUSED(error);
 
   auto *reply = qobject_cast<QNetworkReply *>(sender());
 
-  if (!reply) {
+  if (!reply)
     return;
-  }
 
-  if (reply != m_currentReply) {
-    qDebug() << "[LlmClient] Ignoring stale error reply=" << reply;
+  ReplyState *state = stateFor(reply);
+
+  if (!state)
     return;
-  }
 
-  if (m_abortRequested) {
+  if (state->abortRequested)
     return;
-  }
 
-  m_requestFailed = true;
+  state->requestFailed = true;
 }

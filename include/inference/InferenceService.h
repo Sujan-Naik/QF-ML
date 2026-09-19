@@ -5,7 +5,6 @@
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
-#include <QQueue>
 #include <QString>
 #include <QStringList>
 #include <QUuid>
@@ -15,6 +14,7 @@
 
 #include "../voice/ITranscriber.h"
 #include "LlamaManager.h"
+#include "LlmClient.h"
 #include "ModelManager.h"
 
 class LlmClient;
@@ -34,22 +34,7 @@ public:
   enum class LlmAuthType { None, Bearer };
   Q_ENUM(LlmAuthType)
 
-  // Opaque handle for a single in-flight chat request. Pass it back to
-  // abortChatRequest() and compare it against the token carried by every
-  // llm* signal to ignore other consumers' streams.
   using RequestToken = QUuid;
-
-  // What to do when a new request is issued while another one is active.
-  enum class RequestPolicy {
-    // Abort the active request and start the new one. Default.
-    Abort,
-    // Queue the new request behind the active one. The new request is
-    // issued automatically when the active one finishes, errors, or is
-    // aborted. Use this for non-critical probes such as the settings
-    // test.
-    Queue,
-  };
-  Q_ENUM(RequestPolicy)
 
   struct LlmConfig {
     LlmMode mode = LlmMode::Local;
@@ -77,10 +62,6 @@ public:
   QString llmEndpoint() const;
   QString llmModel() const;
 
-  // -------------------------------------------------------------------------
-  // Models
-  // -------------------------------------------------------------------------
-
   ModelManager *models() const;
   QString modelDirectory() const;
   bool setModelDirectory(const QString &directory);
@@ -100,38 +81,22 @@ public:
   void downloadLlmModel(const ModelManager::ModelVariant &variant);
   void cancelModelDownload();
 
-  // -------------------------------------------------------------------------
-  // LLM
-  // -------------------------------------------------------------------------
-
-  // Issues a chat request. Returns a token. Every llm* signal carries
-  // the same token for the lifetime of the request. If another request
-  // is already active, `policy` decides whether to abort it or queue
-  // behind it.
   RequestToken sendChatRequest(const QJsonArray &messages,
-                               const QString &model = QString(),
-                               double temperature = 0.7, int timeoutMs = 120000,
-                               const QString &grammar = QString(),
-                               const QJsonObject &responseFormat = QJsonObject(),
-                               const QJsonArray &tools = QJsonArray(),
-                               RequestPolicy policy = RequestPolicy::Abort);
+                             const QString &model = QString(),
+                             double temperature = 0.7, int timeoutMs = 120000,
+                             const QString &grammar = QString(),
+                             const QJsonObject &responseFormat = QJsonObject(),
+                             const QJsonArray &tools = QJsonArray(),
+                             const QString &sessionId = QString());
 
-  // Aborts the request associated with `token`. No-op if the token is
-  // stale or refers to a queued request that has not been dispatched.
+
   void abortChatRequest(const RequestToken &token);
-
-  // Aborts whatever request is currently active, if any.
-  void abortActiveChatRequest();
+  void abortAllChatRequests();
 
   bool isRequestActive(const RequestToken &token) const;
-
-  RequestToken activeRequestToken() const { return m_activeToken; }
+  bool hasActiveRequests() const;
 
   bool isLlmReady() const;
-
-  // -------------------------------------------------------------------------
-  // STT
-  // -------------------------------------------------------------------------
 
   QString transcribe(const std::vector<float> &pcm32f);
   bool isSttReady() const;
@@ -141,10 +106,6 @@ public:
   bool setSttModel(SttModel model);
   bool setSttModelName(const QString &model);
   QStringList availableSttModels() const;
-
-  // -------------------------------------------------------------------------
-  // TTS
-  // -------------------------------------------------------------------------
 
   bool isTtsReady() const;
   bool isTtsEnabled() const;
@@ -156,29 +117,13 @@ public:
   QStringList ttsVoices() const;
   void refreshTtsVoices();
 
-  // -------------------------------------------------------------------------
-  // OCR
-  // -------------------------------------------------------------------------
-
   QString extractText(const QImage &image);
 
 signals:
-  // Every signal carries the token returned by sendChatRequest. Consumers
-  // must compare it against their own token and ignore anything else.
   void llmDelta(const RequestToken &token, const QString &text);
-
   void llmFinished(const RequestToken &token);
-
-  // Emitted instead of llmFinished when the response contained
-  // tool_calls.
   void llmToolCalls(const RequestToken &token, const QJsonArray &toolCalls);
-
   void llmError(const RequestToken &token, const QString &error);
-
-  // Emitted whenever the active request changes: a new one starts, one
-  // finishes, one errors, or one is aborted. Consumers that want to know
-  // "is anyone streaming" can watch this.
-  void activeRequestChanged(const RequestToken &token);
 
   void llmReady();
   void llmConfigurationChanged();
@@ -212,25 +157,13 @@ private slots:
   void onTtsServerReady();
   void onModelSelected(const QString &modelId);
 
-  // LlmClient relay slots. They attach the active token to each signal
-  // before re-emitting.
-  void onClientDelta(const QString &text);
-  void onClientFinished();
-  void onClientToolCalls(const QJsonArray &toolCalls);
-  void onClientError(const QString &error);
+  void onClientDelta(const LlmClient::Token &token, const QString &text);
+  void onClientFinished(const LlmClient::Token &token);
+  void onClientToolCalls(const LlmClient::Token &token,
+                         const QJsonArray &toolCalls);
+  void onClientError(const LlmClient::Token &token, const QString &error);
 
 private:
-  struct PendingRequest {
-    RequestToken token;
-    QJsonArray messages;
-    QString model;
-    double temperature = 0.7;
-    int timeoutMs = 120000;
-    QString grammar;
-    QJsonObject responseFormat;
-    QJsonArray tools;
-  };
-
   bool configureRemoteLlm();
   bool validateLlmConfig(const LlmConfig &config, QString *error = nullptr) const;
   bool startSelectedLlmModel();
@@ -241,14 +174,6 @@ private:
   int resolveSttGpu() const;
   QString resolveSttModelPath(const QString &requestedPath) const;
 
-  // Builds the LlmClient::Request from a PendingRequest and hands it to
-  // the client. Sets m_activeToken and emits activeRequestChanged.
-  void dispatchPendingRequest(const PendingRequest &pending);
-
-  // Pumps the queue if no request is currently active.
-  void pumpRequestQueue();
-
-private:
   std::unique_ptr<ModelManager> m_modelManager;
   std::unique_ptr<LlamaManager> m_llamaManager;
   std::unique_ptr<LlmClient> m_llmClient;
@@ -266,13 +191,6 @@ private:
   QString m_llmEndpoint;
   QString m_llmModel;
   QString m_sttModelPath;
-
-  // The token of the currently-active request, or a null QUuid if none.
-  RequestToken m_activeToken;
-
-  // Requests waiting to be sent after the active one finishes. Only
-  // populated when a caller uses RequestPolicy::Queue.
-  QQueue<PendingRequest> m_requestQueue;
 
   bool m_initialized = false;
   bool m_llmReady = false;
