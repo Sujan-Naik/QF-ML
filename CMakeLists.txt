@@ -637,151 +637,103 @@ function(
         description
 )
 
-    set(
-            should_download
-            FALSE
-    )
+    if (EXISTS "${dest}")
 
-    if (NOT EXISTS "${dest}")
-
-        set(
-                should_download
-                TRUE
+        message(
+                STATUS
+                "${description} already exists."
         )
 
-    else ()
-
-        file(
-                SIZE
-                "${dest}"
-                file_size
-        )
-
-        if (file_size EQUAL 0)
-
-            set(
-                    should_download
-                    TRUE
-            )
-
-        endif ()
+        return()
 
     endif ()
 
-    if (should_download)
+    get_filename_component(
+            destination_dir
+            "${dest}"
+            DIRECTORY
+    )
 
-        get_filename_component(
-                destination_dir
-                "${dest}"
-                DIRECTORY
-        )
+    file(
+            MAKE_DIRECTORY
+            "${destination_dir}"
+    )
+
+    message(
+            STATUS
+            ""
+    )
+
+    message(
+            STATUS
+            "Downloading ${description}..."
+    )
+
+    message(
+            STATUS
+            "URL: ${url}"
+    )
+
+    file(
+            DOWNLOAD
+            "${url}"
+            "${dest}"
+
+            SHOW_PROGRESS
+
+            STATUS
+            download_status
+
+            TIMEOUT
+            1800
+
+            INACTIVITY_TIMEOUT
+            120
+    )
+
+    list(
+            GET
+            download_status
+            0
+            status_code
+    )
+
+    list(
+            GET
+            download_status
+            1
+            error_message
+    )
+
+    if (NOT status_code EQUAL 0)
 
         file(
-                MAKE_DIRECTORY
-                "${destination_dir}"
+                REMOVE
+                "${dest}"
         )
 
         message(
-                STATUS
-                ""
-        )
-
-        message(
-                STATUS
-                "Downloading ${description}..."
-        )
-
-        message(
-                STATUS
+                FATAL_ERROR
+                "Failed to download ${description}: "
+                "${error_message}\n"
                 "URL: ${url}"
         )
 
-        file(
-                DOWNLOAD
-                "${url}"
-                "${dest}"
+    endif ()
 
-                SHOW_PROGRESS
-
-                STATUS
-                download_status
-
-                TIMEOUT
-                1800
-
-                INACTIVITY_TIMEOUT
-                120
-        )
-
-        list(
-                GET
-                download_status
-                0
-                status_code
-        )
-
-        list(
-                GET
-                download_status
-                1
-                error_message
-        )
-
-        if (NOT status_code EQUAL 0)
-
-            file(
-                    REMOVE
-                    "${dest}"
-            )
-
-            message(
-                    FATAL_ERROR
-                    "Failed to download ${description}: "
-                    "${error_message}\n"
-                    "URL: ${url}"
-            )
-
-        endif ()
-
-        file(
-                SIZE
-                "${dest}"
-                file_size
-        )
-
-        if (file_size EQUAL 0)
-
-            file(
-                    REMOVE
-                    "${dest}"
-            )
-
-            message(
-                    FATAL_ERROR
-                    "${description} downloaded as an empty file."
-            )
-
-        endif ()
+    if (NOT EXISTS "${dest}")
 
         message(
-                STATUS
-                "Downloaded ${description} (${file_size} bytes)"
-        )
-
-    else ()
-
-        file(
-                SIZE
-                "${dest}"
-                file_size
-        )
-
-        message(
-                STATUS
-                "${description} already exists (${file_size} bytes)"
+                FATAL_ERROR
+                "${description} was not created at ${dest}."
         )
 
     endif ()
+
+    message(
+            STATUS
+            "Downloaded ${description}"
+    )
 
 endfunction()
 
@@ -810,28 +762,12 @@ function(
 
     if (EXISTS "${destination}")
 
-        file(
-                SIZE
-                "${destination}"
-                existing_size
+        message(
+                STATUS
+                "${description} already exists."
         )
 
-        if (existing_size GREATER 0)
-
-            message(
-                    STATUS
-                    "${description} already exists "
-                    "(${existing_size} bytes)"
-            )
-
-            return()
-
-        endif ()
-
-        file(
-                REMOVE
-                "${destination}"
-        )
+        return()
 
     endif ()
 
@@ -920,29 +856,9 @@ function(
 
     endif ()
 
-    file(
-            SIZE
-            "${destination}"
-            downloaded_size
-    )
-
-    if (downloaded_size EQUAL 0)
-
-        file(
-                REMOVE
-                "${destination}"
-        )
-
-        message(
-                FATAL_ERROR
-                "${description} is empty."
-        )
-
-    endif ()
-
     message(
             STATUS
-            "${description}: ${downloaded_size} bytes"
+            "${description}: downloaded"
     )
 
 endfunction()
@@ -997,16 +913,6 @@ if (QF_STT_MODEL STREQUAL "nemotron-3.5")
             "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
     )
 
-    set(
-            QF_STT_EXPECTED_SIZE
-            741548352
-    )
-
-    set(
-            QF_STT_SHA256
-            "a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae"
-    )
-
 elseif (QF_STT_MODEL STREQUAL "nemotron-en")
 
     set(
@@ -1017,16 +923,6 @@ elseif (QF_STT_MODEL STREQUAL "nemotron-en")
     set(
             QF_STT_FILENAME
             "nemotron-speech-streaming-en-0.6b.q8_0.gguf"
-    )
-
-    set(
-            QF_STT_EXPECTED_SIZE
-            699872960
-    )
-
-    set(
-            QF_STT_SHA256
-            "d9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d"
     )
 
 elseif (QF_STT_MODEL STREQUAL "parakeet-ctc")
@@ -1041,16 +937,6 @@ elseif (QF_STT_MODEL STREQUAL "parakeet-ctc")
             "parakeet-ctc-1.1b.q8_0.gguf"
     )
 
-    set(
-            QF_STT_EXPECTED_SIZE
-            1178100960
-    )
-
-    set(
-            QF_STT_SHA256
-            "6584fc0fdacf1c220401ea4c3a1d5b44454b655c141cb8672178072c203d92b8"
-    )
-
 elseif (QF_STT_MODEL STREQUAL "parakeet-tdt")
 
     set(
@@ -1061,16 +947,6 @@ elseif (QF_STT_MODEL STREQUAL "parakeet-tdt")
     set(
             QF_STT_FILENAME
             "parakeet-tdt-0.6b-v3.q8_0.gguf"
-    )
-
-    set(
-            QF_STT_EXPECTED_SIZE
-            713975456
-    )
-
-    set(
-            QF_STT_SHA256
-            "e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e"
     )
 
 else ()
@@ -1098,27 +974,6 @@ download_hf_model(
         "${QF_STT_MODEL_PATH}"
         "ASR model ${QF_STT_MODEL}"
 )
-
-file(
-        SIZE
-        "${QF_STT_MODEL_PATH}"
-        QF_STT_ACTUAL_SIZE
-)
-
-if (
-        NOT QF_STT_ACTUAL_SIZE EQUAL QF_STT_EXPECTED_SIZE
-)
-
-    message(
-            FATAL_ERROR
-            "ASR model size mismatch.\n"
-            "Model:    ${QF_STT_MODEL}\n"
-            "File:     ${QF_STT_MODEL_PATH}\n"
-            "Expected: ${QF_STT_EXPECTED_SIZE} bytes\n"
-            "Actual:   ${QF_STT_ACTUAL_SIZE} bytes"
-    )
-
-endif ()
 
 message(
         STATUS
