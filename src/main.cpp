@@ -73,7 +73,7 @@ static InferenceService::LlmConfig configuredLlm() {
 }
 
 int main(int argc, char *argv[]) {
-  QCoreApplication::setOrganizationName("QuestFarer");
+  QCoreApplication::setOrganizationName("Questfarer");
 
   QCoreApplication::setApplicationName("qf-ml");
 

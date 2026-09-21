@@ -9,7 +9,7 @@ inline QString dataRoot() {
   const QString base =
       QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
 
-  return QDir(base).filePath(QStringLiteral("QuestFarer"));
+  return QDir(base).filePath(QStringLiteral("Questfarer"));
 }
 
 inline QString qfmlRoot() {
