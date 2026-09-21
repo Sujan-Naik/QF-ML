@@ -5,12 +5,11 @@
 
 namespace QFPaths {
 
-// The shared QF data root. Must match the QF-ML CMake variable
-// QF_DATA_ROOT, which QF-ML computes as:
+// The Lore application data root.
 //
-//   Linux:   $XDG_DATA_HOME/qf-inference, or $HOME/.local/share/qf-inference
-//   macOS:   $HOME/Library/Application Support/qf-inference
-//   Windows: %LOCALAPPDATA%/qf-inference
+//   Linux:   $XDG_DATA_HOME/Questfarer, or $HOME/.local/share/Questfarer
+//   macOS:   $HOME/Library/Application Support/Questfarer
+//   Windows: %LOCALAPPDATA%/Questfarer
 //
 // Qt's GenericDataLocation maps to:
 //
@@ -18,20 +17,23 @@ namespace QFPaths {
 //   macOS:   $HOME/Library/Application Support
 //   Windows: %LOCALAPPDATA%
 //
-// so appending "qf-inference" reproduces QF-ML's QF_DATA_ROOT on every
-// platform. If QF-ML's CMake changes that name, this must change with
-// it. The two are one contract.
+// so appending "Questfarer" reproduces the root on every platform.
 inline QString dataRoot() {
   const QString base =
       QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
 
-  return QDir(base).filePath(QStringLiteral("qf-inference"));
+  return QDir(base).filePath(QStringLiteral("Questfarer"));
 }
 
-// Models live under the shared data root. QF-ML downloads into
-// <dataRoot>/models, and every accessor below is a subdirectory of it.
+// Everything QF-ML produces lives under <dataRoot>/qf-ml.
+inline QString qfMlRoot() {
+  return QDir(dataRoot()).filePath(QStringLiteral("qf-ml"));
+}
+
+// Models live under <qfMlRoot>/models. QF-ML downloads into this
+// directory, and every accessor below is a subdirectory of it.
 inline QString modelsRoot() {
-  return QDir(dataRoot()).filePath(QStringLiteral("models"));
+  return QDir(qfMlRoot()).filePath(QStringLiteral("models"));
 }
 
 inline QString llmModelsDir() {

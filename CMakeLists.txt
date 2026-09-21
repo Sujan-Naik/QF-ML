@@ -1,4 +1,3 @@
-
 cmake_minimum_required(VERSION 3.26)
 
 project(
@@ -521,19 +520,31 @@ set_target_properties(
 # =============================================================================
 # 3. Shared QF data directory
 # =============================================================================
+#
+# The model root is <dataRoot>/qf-ml/models, where dataRoot is the
+# platform-specific application data directory:
+#
+#   Linux:   $XDG_DATA_HOME/Questfarer, or $HOME/.local/share/Questfarer
+#   macOS:   $HOME/Library/Application Support/Questfarer
+#   Windows: %LOCALAPPDATA%/Questfarer
+#
+# This must match QFPaths::dataRoot() in include/app/QfPaths.h on every
+# platform. The two are one contract: if one changes, the other must change
+# with it.
+# =============================================================================
 
 if (WIN32)
 
     set(
             QF_DATA_ROOT
-            "$ENV{LOCALAPPDATA}/qf-inference"
+            "$ENV{LOCALAPPDATA}/Questfarer/qf-ml"
     )
 
 elseif (APPLE)
 
     set(
             QF_DATA_ROOT
-            "$ENV{HOME}/Library/Application Support/qf-inference"
+            "$ENV{HOME}/Library/Application Support/Questfarer/qf-ml"
     )
 
 else ()
@@ -545,14 +556,14 @@ else ()
 
         set(
                 QF_DATA_ROOT
-                "$ENV{XDG_DATA_HOME}/qf-inference"
+                "$ENV{XDG_DATA_HOME}/Questfarer/qf-ml"
         )
 
     else ()
 
         set(
                 QF_DATA_ROOT
-                "$ENV{HOME}/.local/share/qf-inference"
+                "$ENV{HOME}/.local/share/Questfarer/qf-ml"
         )
 
     endif ()
@@ -1640,4 +1651,3 @@ message(
         STATUS
         ""
 )
-
