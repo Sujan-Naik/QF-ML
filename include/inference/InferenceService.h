@@ -89,7 +89,6 @@ public:
                              const QJsonArray &tools = QJsonArray(),
                              const QString &sessionId = QString());
 
-
   void abortChatRequest(const RequestToken &token);
   void abortAllChatRequests();
 
@@ -97,6 +96,10 @@ public:
   bool hasActiveRequests() const;
 
   bool isLlmReady() const;
+
+  // -----------------------------------------------------------------
+  // Speech to text
+  // -----------------------------------------------------------------
 
   QString transcribe(const std::vector<float> &pcm32f);
   bool isSttReady() const;
@@ -106,6 +109,20 @@ public:
   bool setSttModel(SttModel model);
   bool setSttModelName(const QString &model);
   QStringList availableSttModels() const;
+
+  // Live streaming. Opens a streaming session on the underlying
+  // NemoTranscriber, feeds chunks, and delivers results through
+  // liveSegment. isFinal distinguishes a finalized utterance from an
+  // interim that will be replaced. sttStreamOpened and sttStreamClosed
+  // mark the ready-to-accept-audio and fully-closed boundaries.
+  bool startSttStreaming(int32_t rightContext = 1);
+  void feedSttAudio(const std::vector<float> &pcm);
+  void stopSttStreaming();
+  bool isSttStreaming() const;
+
+  // -----------------------------------------------------------------
+  // Text to speech
+  // -----------------------------------------------------------------
 
   bool isTtsReady() const;
   bool isTtsEnabled() const;
@@ -131,6 +148,16 @@ signals:
   void transcriptionFinished(const QString &text);
   void transcriptionError(const QString &error);
   void sttModelChanged(const QString &model);
+
+  // Emitted on the main thread for every streaming result. isFinal is
+  // true when the utterance is complete and the text will not change
+  // again; false while the runtime may still refine it.
+  void liveSegment(const QString &text, bool isFinal);
+
+  // Forwarded from NemoTranscriber. Emitted when the streaming session
+  // is ready to accept audio, and when it has fully closed.
+  void sttStreamOpened();
+  void sttStreamClosed();
 
   void ttsSentenceFinished();
   void ttsError(const QString &error);
@@ -195,5 +222,6 @@ private:
   bool m_initialized = false;
   bool m_llmReady = false;
   bool m_sttReady = false;
+  bool m_sttStreaming = false;
   bool m_ttsReady = false;
 };

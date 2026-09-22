@@ -178,6 +178,21 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
                 emit serviceError(error);
               });
 
+      connect(transcriber.get(), &NemoTranscriber::liveSegment, this,
+              &InferenceService::liveSegment);
+
+      connect(transcriber.get(), &NemoTranscriber::streamOpened, this,
+              [this]() {
+                m_sttStreaming = true;
+                emit sttStreamOpened();
+              });
+
+      connect(transcriber.get(), &NemoTranscriber::streamClosed, this,
+              [this]() {
+                m_sttStreaming = false;
+                emit sttStreamClosed();
+              });
+
       m_stt = std::move(transcriber);
       m_sttReady = true;
 
@@ -523,6 +538,7 @@ InferenceService::RequestToken InferenceService::sendChatRequest(
 
   return m_llmClient->sendRequest(request);
 }
+
 void InferenceService::abortChatRequest(const RequestToken &token) {
   if (m_llmClient)
     m_llmClient->abortRequest(token);
@@ -605,6 +621,7 @@ bool InferenceService::setSttModel(SttModel model) {
 
   m_sttModel = model;
   m_sttReady = false;
+  m_sttStreaming = false;
   m_stt.reset();
 
   const QString path = resolveSttModelPath(QString());
@@ -633,6 +650,21 @@ bool InferenceService::setSttModel(SttModel model) {
           [this](const QString &error) {
             emit transcriptionError(error);
             emit serviceError(error);
+          });
+
+  connect(transcriber.get(), &NemoTranscriber::liveSegment, this,
+          &InferenceService::liveSegment);
+
+  connect(transcriber.get(), &NemoTranscriber::streamOpened, this,
+          [this]() {
+            m_sttStreaming = true;
+            emit sttStreamOpened();
+          });
+
+  connect(transcriber.get(), &NemoTranscriber::streamClosed, this,
+          [this]() {
+            m_sttStreaming = false;
+            emit sttStreamClosed();
           });
 
   m_stt = std::move(transcriber);
@@ -666,6 +698,27 @@ QStringList InferenceService::availableSttModels() const {
   return {QStringLiteral("nemotron-3.5"), QStringLiteral("nemotron-en"),
           QStringLiteral("parakeet-tdt"), QStringLiteral("parakeet-ctc")};
 }
+
+bool InferenceService::startSttStreaming(int32_t rightContext) {
+  auto *nemo = dynamic_cast<NemoTranscriber *>(m_stt.get());
+  if (!nemo) {
+    emit serviceError(QStringLiteral("STT streaming requires NeMo-Speech."));
+    return false;
+  }
+  return nemo->startStreaming(rightContext);
+}
+
+void InferenceService::feedSttAudio(const std::vector<float> &pcm) {
+  auto *nemo = dynamic_cast<NemoTranscriber *>(m_stt.get());
+  if (nemo) nemo->feedAudio(pcm);
+}
+
+void InferenceService::stopSttStreaming() {
+  auto *nemo = dynamic_cast<NemoTranscriber *>(m_stt.get());
+  if (nemo) nemo->stopStreaming();
+}
+
+bool InferenceService::isSttStreaming() const { return m_sttStreaming; }
 
 bool InferenceService::isTtsReady() const { return m_ttsReady; }
 
