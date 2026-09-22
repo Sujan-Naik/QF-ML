@@ -77,6 +77,22 @@ InferenceService::InferenceService(QObject *parent)
   connect(m_ttsManager.get(), &TtsManager::sentenceFinished, this,
           &InferenceService::ttsSentenceFinished);
 
+  connect(m_ttsManager.get(), &TtsManager::chunkReady, this,
+          &InferenceService::ttsChunkReady);
+
+  connect(m_ttsManager.get(), &TtsManager::chunkPlaybackStarted, this,
+          [this](const AudioChunk &chunk) {
+            m_ttsSpeaking = true;
+            emit ttsChunkPlaybackStarted(chunk);
+          });
+
+  connect(m_ttsManager.get(), &TtsManager::sentenceFinished, this,
+          [this]() {
+            if (!m_ttsManager || !m_ttsManager->isSpeaking()) {
+              m_ttsSpeaking = false;
+            }
+          });
+
   connect(m_ttsManager.get(), &TtsManager::errorOccurred, this,
           [this](const QString &error) {
             emit ttsError(error);
@@ -789,6 +805,8 @@ bool InferenceService::isTtsEnabled() const {
   return m_ttsManager->isEnabled();
 }
 
+bool InferenceService::isTtsSpeaking() const { return m_ttsSpeaking; }
+
 void InferenceService::setTtsEnabled(bool enabled) {
   if (!m_ttsManager)
     return;
@@ -808,6 +826,8 @@ void InferenceService::speak(const QString &text, int speakerId) {
 void InferenceService::stopSpeech() {
   if (m_ttsManager)
     m_ttsManager->stopAndClear();
+
+  m_ttsSpeaking = false;
 }
 
 QString InferenceService::ttsVoice() const {

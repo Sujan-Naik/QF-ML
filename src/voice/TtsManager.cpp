@@ -1,12 +1,14 @@
 #include "../../include/voice/TtsManager.h"
 
 #include <QDebug>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMediaDevices>
 #include <QNetworkProxy>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QSet>
 
 TtsManager::TtsManager(QObject *parent)
     : QObject(parent), m_networkManager(new QNetworkAccessManager(this)),
@@ -164,7 +166,7 @@ void TtsManager::requestSynthesis(const QString &text, int speakerId,
   }
 
   const QString url =
-      m_serverUrl.toString() + QStringLiteral("/v1/audio/speech");
+      m_serverUrl.toString() + QStringLiteral("/dev/captioned_speech");
 
   qDebug() << "[TTS] Synthesizing voice=" << m_voice
            << "text length=" << text.length() << "generation=" << generation;
@@ -178,7 +180,6 @@ void TtsManager::requestSynthesis(const QString &text, int speakerId,
 
   const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
-  // IMPORTANT: braces avoid the C++ vexing parse.
   QNetworkRequest request{QUrl(url)};
 
   request.setHeader(QNetworkRequest::ContentTypeHeader,
@@ -258,24 +259,31 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
     return;
   }
 
-  const QByteArray audio = reply->readAll();
+  const QByteArray payload = reply->readAll();
 
-  if (audio.isEmpty()) {
+  if (payload.isEmpty()) {
     m_synthesisInProgress = false;
 
     reply->deleteLater();
 
-    emit errorOccurred(QStringLiteral("Empty audio data from TTS server"));
+    emit errorOccurred(QStringLiteral("Empty response from TTS server"));
 
     return;
   }
 
   AudioChunk chunk;
+  QString parseError;
 
-  chunk.data = audio;
-  chunk.sampleRate = 24000;
-  chunk.speakerId = speakerId;
-  chunk.timestamp = QDateTime::currentMSecsSinceEpoch();
+  if (!parseCaptionedResponse(payload, speakerId, chunk, parseError)) {
+    m_synthesisInProgress = false;
+
+    reply->deleteLater();
+
+    emit errorOccurred(
+        QStringLiteral("TTS response could not be parsed: %1").arg(parseError));
+
+    return;
+  }
 
   {
     QMutexLocker locker(&m_queueMutex);
@@ -286,11 +294,125 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
   m_synthesisInProgress = false;
 
   emit sentenceQueued(speakerId);
+  emit chunkReady(chunk);
 
   reply->deleteLater();
 
   if (!m_isPlaying)
     playNextInQueue();
+}
+
+bool TtsManager::parseCaptionedResponse(const QByteArray &payload,
+                                        int speakerId,
+                                        AudioChunk &out,
+                                        QString &error) {
+  QJsonParseError parseError;
+
+  const QJsonDocument doc =
+      QJsonDocument::fromJson(payload, &parseError);
+
+  if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+    error = parseError.errorString();
+    return false;
+  }
+
+  const QJsonObject object = doc.object();
+
+  const QString audioB64 = object.value(QStringLiteral("audio")).toString();
+
+  if (audioB64.isEmpty()) {
+    error = QStringLiteral("missing 'audio' field");
+    return false;
+  }
+
+  const QByteArray audio =
+      QByteArray::fromBase64(audioB64.toUtf8());
+
+  if (audio.isEmpty()) {
+    error = QStringLiteral("audio decoded to zero bytes");
+    return false;
+  }
+
+  out.data = audio;
+  out.sampleRate = 24000;
+  out.speakerId = speakerId;
+  out.timestamp = QDateTime::currentMSecsSinceEpoch();
+  out.visemes.clear();
+
+  const QJsonArray timestamps =
+      object.value(QStringLiteral("timestamps")).toArray();
+
+  out.visemes.reserve(timestamps.size());
+
+  for (const QJsonValue &value : timestamps) {
+    if (!value.isObject()) {
+      continue;
+    }
+
+    const QJsonObject entry = value.toObject();
+
+    const QString word =
+        entry.value(QStringLiteral("word")).toString().trimmed();
+
+    if (word.isEmpty()) {
+      continue;
+    }
+
+    const double startSeconds =
+        entry.value(QStringLiteral("start_time")).toDouble();
+    const double endSeconds =
+        entry.value(QStringLiteral("end_time")).toDouble();
+
+    Viseme viseme;
+    viseme.startMs = static_cast<int>(startSeconds * 1000.0);
+    viseme.endMs = static_cast<int>(endSeconds * 1000.0);
+    viseme.shape = visemeForWord(word);
+
+    out.visemes.append(viseme);
+  }
+
+  return true;
+}
+
+QString TtsManager::visemeForWord(const QString &word) {
+  const QString lower = word.toLower();
+
+  QString cleaned;
+  cleaned.reserve(lower.size());
+
+  for (QChar c : lower) {
+    if (c.isLetter()) {
+      cleaned.append(c);
+    }
+  }
+
+  if (cleaned.isEmpty()) {
+    return QStringLiteral("sil");
+  }
+
+  int a = 0, e = 0, i = 0, o = 0, u = 0;
+
+  for (QChar c : cleaned) {
+    if (c == QChar('a')) ++a;
+    else if (c == QChar('e')) ++e;
+    else if (c == QChar('i') || c == QChar('y')) ++i;
+    else if (c == QChar('o')) ++o;
+    else if (c == QChar('u')) ++u;
+  }
+
+  const int total = a + e + i + o + u;
+
+  if (total == 0) {
+    return QStringLiteral("M");
+  }
+
+  const int maxCount = std::max({a, e, i, o, u});
+
+  if (a == maxCount) return QStringLiteral("A");
+  if (e == maxCount) return QStringLiteral("E");
+  if (i == maxCount) return QStringLiteral("I");
+  if (o == maxCount) return QStringLiteral("O");
+  return QStringLiteral("U");
 }
 
 void TtsManager::playNextInQueue() {
@@ -350,9 +472,12 @@ void TtsManager::playNextInQueue() {
   m_isPlaying = true;
   m_playbackCompletionPending = true;
 
-  qDebug() << "[TTS] Playing chunk:" << chunk.data.size() << "bytes";
+  qDebug() << "[TTS] Playing chunk:" << chunk.data.size() << "bytes"
+           << "visemes:" << chunk.visemes.size();
 
   m_audioSink->start(&m_audioBuffer);
+
+  emit chunkPlaybackStarted(chunk);
 }
 
 void TtsManager::onAudioStateChanged(QAudio::State state) {
@@ -399,9 +524,6 @@ void TtsManager::finishCurrentPlayback() {
 
   m_playbackCompletionPending = false;
 
-  /*
-   * Stop the sink before closing its source.
-   */
   if (m_audioSink)
     m_audioSink->stop();
 

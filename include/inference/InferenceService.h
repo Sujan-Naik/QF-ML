@@ -13,13 +13,13 @@
 #include <vector>
 
 #include "../voice/ITranscriber.h"
+#include "../voice/TtsManager.h"
 #include "LlamaManager.h"
 #include "LlmClient.h"
 #include "ModelManager.h"
 #include "embedding/EmbeddingModel.h"
 
 class LlmClient;
-class TtsManager;
 class QNetworkAccessManager;
 
 class InferenceService : public QObject {
@@ -130,17 +130,19 @@ public:
   QStringList ttsVoices() const;
   void refreshTtsVoices();
 
+  // True while the audio sink is actively playing a chunk. Consumers
+  // driving a face can use this to know when the mouth should be
+  // running the viseme timeline rather than idling.
+  bool isTtsSpeaking() const;
+
   // -----------------------------------------------------------------
   // Embeddings
   // -----------------------------------------------------------------
 
-  // Produce a 384-dimensional L2-normalized embedding. Empty on
-  // failure or if the embedder is not loaded.
   std::vector<float> embed(const QString &text);
 
   bool isEmbedderReady() const;
 
-  // 384 for MiniLM, or 0 when not loaded.
   int embedderDimensions() const;
 
   QString extractText(const QImage &image);
@@ -169,6 +171,16 @@ signals:
   void ttsVoiceChanged(const QString &voice);
   void ttsVoicesChanged(const QStringList &voices);
   void ttsReady();
+
+  // Emitted when a TTS sentence's audio is ready. Carries the audio and
+  // the viseme timeline for that sentence. Consumers driving a face
+  // should subscribe; consumers that only care about playback can
+  // ignore it.
+  void ttsChunkReady(const AudioChunk &chunk);
+
+  // Emitted when playback of a chunk begins. Consumers use this to
+  // start their viseme clock.
+  void ttsChunkPlaybackStarted(const AudioChunk &chunk);
 
   void embedderReady();
   void embedderError(const QString &error);
@@ -234,5 +246,6 @@ private:
   bool m_sttReady = false;
   bool m_sttStreaming = false;
   bool m_ttsReady = false;
+  bool m_ttsSpeaking = false;
   bool m_embedderReady = false;
 };

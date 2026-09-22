@@ -13,14 +13,27 @@
 #include <QStringList>
 #include <QTimer>
 #include <QUrl>
+#include <QVector>
 
 #include <memory>
+
+// A single mouth shape with a time range, relative to the start of the
+// audio in the enclosing AudioChunk. Times are milliseconds.
+struct Viseme {
+  int startMs = 0;
+  int endMs = 0;
+  QString shape;   // "A", "E", "I", "O", "U", "M", "sil"
+};
 
 struct AudioChunk {
   QByteArray data;
   int sampleRate = 24000;
   int speakerId = 0;
   qint64 timestamp = 0;
+
+  // Populated by the captioned speech path. Empty when the chunk came
+  // from the plain synthesis path.
+  QVector<Viseme> visemes;
 };
 
 class TtsManager : public QObject {
@@ -53,6 +66,8 @@ public:
 
   void stopDockerContainer();
 
+  [[nodiscard]] bool isSpeaking() const { return m_isPlaying; }
+
 signals:
   void sentenceQueued(int speakerId);
 
@@ -65,6 +80,10 @@ signals:
   void voiceChanged(const QString &voice);
 
   void voicesChanged(const QStringList &voices);
+
+  void chunkReady(const AudioChunk &chunk);
+
+  void chunkPlaybackStarted(const AudioChunk &chunk);
 
 private slots:
   void playNextInQueue();
@@ -97,6 +116,13 @@ private:
   void pullDockerImage();
 
   void runDockerContainer();
+
+  static bool parseCaptionedResponse(const QByteArray &payload,
+                                     int speakerId,
+                                     AudioChunk &out,
+                                     QString &error);
+
+  static QString visemeForWord(const QString &word);
 
   static QStringList defaultVoices();
 
