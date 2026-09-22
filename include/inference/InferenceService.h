@@ -16,6 +16,7 @@
 #include "LlamaManager.h"
 #include "LlmClient.h"
 #include "ModelManager.h"
+#include "embedding/EmbeddingModel.h"
 
 class LlmClient;
 class TtsManager;
@@ -110,11 +111,6 @@ public:
   bool setSttModelName(const QString &model);
   QStringList availableSttModels() const;
 
-  // Live streaming. Opens a streaming session on the underlying
-  // NemoTranscriber, feeds chunks, and delivers results through
-  // liveSegment. isFinal distinguishes a finalized utterance from an
-  // interim that will be replaced. sttStreamOpened and sttStreamClosed
-  // mark the ready-to-accept-audio and fully-closed boundaries.
   bool startSttStreaming(int32_t rightContext = 1);
   void feedSttAudio(const std::vector<float> &pcm);
   void stopSttStreaming();
@@ -134,6 +130,19 @@ public:
   QStringList ttsVoices() const;
   void refreshTtsVoices();
 
+  // -----------------------------------------------------------------
+  // Embeddings
+  // -----------------------------------------------------------------
+
+  // Produce a 384-dimensional L2-normalized embedding. Empty on
+  // failure or if the embedder is not loaded.
+  std::vector<float> embed(const QString &text);
+
+  bool isEmbedderReady() const;
+
+  // 384 for MiniLM, or 0 when not loaded.
+  int embedderDimensions() const;
+
   QString extractText(const QImage &image);
 
 signals:
@@ -149,13 +158,8 @@ signals:
   void transcriptionError(const QString &error);
   void sttModelChanged(const QString &model);
 
-  // Emitted on the main thread for every streaming result. isFinal is
-  // true when the utterance is complete and the text will not change
-  // again; false while the runtime may still refine it.
   void liveSegment(const QString &text, bool isFinal);
 
-  // Forwarded from NemoTranscriber. Emitted when the streaming session
-  // is ready to accept audio, and when it has fully closed.
   void sttStreamOpened();
   void sttStreamClosed();
 
@@ -165,6 +169,9 @@ signals:
   void ttsVoiceChanged(const QString &voice);
   void ttsVoicesChanged(const QStringList &voices);
   void ttsReady();
+
+  void embedderReady();
+  void embedderError(const QString &error);
 
   void remoteLlmModelsChanged();
   void remoteLlmVariantsChanged(const QString &repoId);
@@ -195,6 +202,8 @@ private:
   bool validateLlmConfig(const LlmConfig &config, QString *error = nullptr) const;
   bool startSelectedLlmModel();
 
+  bool startEmbedder();
+
   QString resolveSttModelFilename(SttModel model) const;
   QString sttModelToString(SttModel model) const;
   SttModel sttModelFromString(const QString &model) const;
@@ -206,6 +215,7 @@ private:
   std::unique_ptr<LlmClient> m_llmClient;
   std::unique_ptr<TtsManager> m_ttsManager;
   std::unique_ptr<ITranscriber> m_stt;
+  std::unique_ptr<EmbeddingModel> m_embedder;
 
   QNetworkAccessManager *m_networkManager = nullptr;
 
@@ -224,4 +234,5 @@ private:
   bool m_sttReady = false;
   bool m_sttStreaming = false;
   bool m_ttsReady = false;
+  bool m_embedderReady = false;
 };

@@ -1,5 +1,6 @@
 #include "../../include/inference/InferenceService.h"
 
+#include "../include/embedding/EmbeddingModel.h"
 #include "../include/inference/LlmClient.h"
 #include "../include/voice/NemoTranscriber.h"
 #include "../include/voice/TtsManager.h"
@@ -137,6 +138,8 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
     emit serviceError(QStringLiteral("Failed to initialize TTS."));
   }
 
+  startEmbedder();
+
   const QString environmentModel = qEnvironmentVariable("QF_STT_MODEL").trimmed();
 
   if (!environmentModel.isEmpty()) {
@@ -206,6 +209,63 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
 
   m_initialized = true;
   return true;
+}
+
+bool InferenceService::startEmbedder() {
+  if (m_embedderReady) {
+    return true;
+  }
+
+  const QString modelPath =
+      QDir(QFPaths::modelsRoot())
+          .filePath(QStringLiteral("embedding/model_quantized.onnx"));
+
+  const QString vocabPath =
+      QDir(QFPaths::modelsRoot())
+          .filePath(QStringLiteral("embedding/vocab.txt"));
+
+  if (!QFileInfo::exists(modelPath) || !QFileInfo::exists(vocabPath)) {
+    qWarning() << "[InferenceService] Embedding model not present at"
+               << modelPath;
+    emit embedderError(
+        QStringLiteral("Embedding model files are missing."));
+    return false;
+  }
+
+  auto embedder = std::make_unique<EmbeddingModel>();
+
+  if (!embedder->load(modelPath, vocabPath)) {
+    emit embedderError(
+        QStringLiteral("Failed to load embedding model."));
+    return false;
+  }
+
+  m_embedder = std::move(embedder);
+  m_embedderReady = true;
+
+  qDebug() << "[InferenceService] Embedder ready, dimensions ="
+           << m_embedder->dimensions();
+
+  emit embedderReady();
+  return true;
+}
+
+std::vector<float> InferenceService::embed(const QString &text) {
+  if (!m_embedderReady || !m_embedder) {
+    return {};
+  }
+
+  return m_embedder->embed(text);
+}
+
+bool InferenceService::isEmbedderReady() const { return m_embedderReady; }
+
+int InferenceService::embedderDimensions() const {
+  if (!m_embedder) {
+    return 0;
+  }
+
+  return m_embedder->dimensions();
 }
 
 bool InferenceService::validateLlmConfig(const LlmConfig &config,

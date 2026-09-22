@@ -1049,6 +1049,48 @@ foreach (
 endforeach ()
 
 # =============================================================================
+# 3F. Embedding model (all-MiniLM-L6-v2, INT8 quantized)
+# =============================================================================
+#
+# Used by Lore for semantic search over the notes vault.
+#
+# Files:
+#   model_quantized.onnx  ~23 MB
+#   vocab.txt             ~232 KB
+#
+# Both are hosted on Hugging Face. The quantized model is from the
+# Xenova export; the vocab is from the original sentence-transformers
+# repo. They are the pair the model was trained with.
+
+set(
+        QF_EMBEDDING_DIR
+        "${MODELS_DIR}/embedding"
+)
+
+file(
+        MAKE_DIRECTORY
+        "${QF_EMBEDDING_DIR}"
+)
+download_hf_model(
+        "Xenova/all-MiniLM-L6-v2"
+        "onnx/model_quantized.onnx"
+        "${QF_EMBEDDING_DIR}/model_quantized.onnx"
+        "Embedding model all-MiniLM-L6-v2 (INT8)"
+)
+
+download_hf_model(
+        "sentence-transformers/all-MiniLM-L6-v2"
+        "vocab.txt"
+        "${QF_EMBEDDING_DIR}/vocab.txt"
+        "Embedding model vocab"
+)
+
+message(
+        STATUS
+        "Embedding model directory: ${QF_EMBEDDING_DIR}"
+)
+
+# =============================================================================
 # 4. OCR Libraries
 # =============================================================================
 
@@ -1142,6 +1184,10 @@ add_library(
         src/ui/QuantizationGuideDialog.cpp
 
         include/app/QfPaths.h
+        include/embedding/WordPieceTokenizer.h
+        include/embedding/EmbeddingModel.h
+        src/embedding/WordPieceTokenizer.cpp
+        src/embedding/EmbeddingModel.cpp
 )
 
 target_include_directories(
@@ -1150,6 +1196,7 @@ target_include_directories(
         PUBLIC
 
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${ONNXRUNTIME_INCLUDE_DIR}"
 
         PRIVATE
 
@@ -1158,7 +1205,6 @@ target_include_directories(
 
         "${NEMO_SPEECH_SOURCE_DIR}/include"
 
-        "${ONNXRUNTIME_INCLUDE_DIR}"
 )
 
 target_link_libraries(
@@ -1202,6 +1248,7 @@ qt_add_executable(
 
         include/app/RuntimeManager.h
         src/app/RuntimeManager.cpp
+
 )
 
 target_link_libraries(
