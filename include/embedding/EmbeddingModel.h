@@ -1,13 +1,13 @@
 #pragma once
 
 #include "WordPieceTokenizer.h"
-#include <onnxruntime_cxx_api.h>
 
 #include <QString>
 
 #include <memory>
 #include <vector>
 
+#include <onnxruntime_cxx_api.h>
 
 // Local sentence embedding model. Loads a quantized ONNX file and the
 // matching WordPiece vocabulary, and produces 384-dimensional L2-
@@ -17,6 +17,10 @@
 // with [CLS] at the front and [SEP] at the back, truncated at 256
 // tokens. Output is mean-pooled over the attention mask and then
 // L2-normalized so cosine similarity is a dot product.
+//
+// The ONNX export declares three inputs: input_ids, attention_mask,
+// token_type_ids. Ort requires every declared input to be supplied,
+// so a zero-filled token_type_ids tensor is always provided.
 class EmbeddingModel {
 public:
   EmbeddingModel() = default;
@@ -51,6 +55,7 @@ private:
 
   std::string m_inputIdsName;
   std::string m_attentionMaskName;
+  std::string m_tokenTypeIdsName;
   std::string m_outputName;
 
   int m_dimensions = 384;

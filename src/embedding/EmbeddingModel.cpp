@@ -4,6 +4,7 @@
 #include <QFile>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -35,8 +36,6 @@ bool EmbeddingModel::load(const QString &modelPath, const QString &vocabPath) {
   try {
     Ort::SessionOptions options = makeSessionOptions();
 
-    // ONNX Runtime on Linux takes const char*; on Windows it wants
-    // wchar_t*. The WakeWordDetector already uses this pattern.
 #ifdef _WIN32
     m_session = std::make_unique<Ort::Session>(
         m_env, modelPath.toStdWString().c_str(), options);
@@ -51,23 +50,21 @@ bool EmbeddingModel::load(const QString &modelPath, const QString &vocabPath) {
     return false;
   }
 
-  // Discover input and output names. MiniLM has two inputs:
-  // input_ids and attention_mask, and one output: last_hidden_state.
   Ort::AllocatorWithDefaultOptions allocator;
 
   const size_t inputCount = m_session->GetInputCount();
-  if (inputCount < 2) {
-    qWarning() << "[EmbeddingModel] Expected 2 inputs, got" << inputCount;
-    m_session.reset();
-    return false;
-  }
 
+  // The MiniLM ONNX export declares three inputs: input_ids,
+  // attention_mask, token_type_ids. Ort requires all three to be
+  // supplied, even if token_type_ids is zeros.
   for (size_t i = 0; i < inputCount; ++i) {
-    const std::string name =
-        m_session->GetInputNameAllocated(i, allocator).get();
+    auto allocated = m_session->GetInputNameAllocated(i, allocator);
+    const std::string name = allocated.get();
 
     if (name.find("attention") != std::string::npos) {
       m_attentionMaskName = name;
+    } else if (name.find("token_type") != std::string::npos) {
+      m_tokenTypeIdsName = name;
     } else {
       m_inputIdsName = name;
     }
@@ -80,19 +77,21 @@ bool EmbeddingModel::load(const QString &modelPath, const QString &vocabPath) {
     return false;
   }
 
-  m_outputName =
-      m_session->GetOutputNameAllocated(0, allocator).get();
+  {
+    auto allocated = m_session->GetOutputNameAllocated(0, allocator);
+    m_outputName = allocated.get();
+  }
 
-  if (m_inputIdsName.empty() || m_attentionMaskName.empty() ||
-      m_outputName.empty()) {
+  if (m_inputIdsName.empty() || m_attentionMaskName.empty()) {
     qWarning() << "[EmbeddingModel] Could not resolve tensor names";
     m_session.reset();
     return false;
   }
 
   qDebug() << "[EmbeddingModel] Loaded" << modelPath
-           << "inputs:" << QString::fromStdString(m_inputIdsName)
-           << QString::fromStdString(m_attentionMaskName)
+           << "ids:" << QString::fromStdString(m_inputIdsName)
+           << "mask:" << QString::fromStdString(m_attentionMaskName)
+           << "types:" << QString::fromStdString(m_tokenTypeIdsName)
            << "output:" << QString::fromStdString(m_outputName);
 
   return true;
@@ -126,9 +125,9 @@ std::vector<float> EmbeddingModel::runInference(
 
   const int64_t sequenceLength = inputIds.size();
 
-  // ONNX Runtime needs mutable data pointers. Copy into vectors we own.
   std::vector<int64_t> ids(inputIds.begin(), inputIds.end());
   std::vector<int64_t> mask(attentionMask.begin(), attentionMask.end());
+  std::vector<int64_t> types(static_cast<size_t>(sequenceLength), 0);
 
   Ort::MemoryInfo memoryInfo =
       Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
@@ -141,19 +140,33 @@ std::vector<float> EmbeddingModel::runInference(
   Ort::Value maskTensor = Ort::Value::CreateTensor<int64_t>(
       memoryInfo, mask.data(), mask.size(), inputShape, 2);
 
-  const char *inputNames[] = {m_inputIdsName.c_str(),
-                              m_attentionMaskName.c_str()};
+  Ort::Value typesTensor = Ort::Value::CreateTensor<int64_t>(
+      memoryInfo, types.data(), types.size(), inputShape, 2);
+
+  std::vector<const char *> inputNames;
+  std::vector<Ort::Value> inputTensors;
+
+  inputNames.push_back(m_inputIdsName.c_str());
+  inputTensors.push_back(std::move(idsTensor));
+
+  inputNames.push_back(m_attentionMaskName.c_str());
+  inputTensors.push_back(std::move(maskTensor));
+
+  // Only pass token_type_ids if the model actually declares it. Some
+  // MiniLM exports omit it.
+  if (!m_tokenTypeIdsName.empty()) {
+    inputNames.push_back(m_tokenTypeIdsName.c_str());
+    inputTensors.push_back(std::move(typesTensor));
+  }
+
   const char *outputNames[] = {m_outputName.c_str()};
 
   std::vector<Ort::Value> outputs;
 
   try {
     outputs = m_session->Run(
-        Ort::RunOptions{nullptr}, inputNames,
-        std::array<Ort::Value, 2>{std::move(idsTensor),
-                                  std::move(maskTensor)}
-            .data(),
-        2, outputNames, 1);
+        Ort::RunOptions{nullptr}, inputNames.data(), inputTensors.data(),
+        inputTensors.size(), outputNames, 1);
   } catch (const Ort::Exception &e) {
     qWarning() << "[EmbeddingModel] Inference failed:" << e.what();
     return {};
@@ -164,7 +177,6 @@ std::vector<float> EmbeddingModel::runInference(
     return {};
   }
 
-  // Output shape is [1, sequenceLength, 384].
   const auto shapeInfo =
       outputs[0].GetTensorTypeAndShapeInfo();
   const std::vector<int64_t> shape = shapeInfo.GetShape();
@@ -179,8 +191,6 @@ std::vector<float> EmbeddingModel::runInference(
 
   const int64_t tokens = shape[1];
 
-  // Mean pooling over the attention mask. Every token is 1 in our
-  // mask because we do not pad, so the divisor is just tokens.
   std::vector<float> pooled(m_dimensions, 0.0f);
 
   for (int64_t t = 0; t < tokens; ++t) {
@@ -195,7 +205,6 @@ std::vector<float> EmbeddingModel::runInference(
     pooled[d] *= inv;
   }
 
-  // L2 normalize so cosine similarity is a dot product.
   float norm = 0.0f;
   for (float v : pooled) {
     norm += v * v;
