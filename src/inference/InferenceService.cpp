@@ -150,8 +150,11 @@ bool InferenceService::initialize(LlamaManager::Backend llamaBackend,
     }
   }
 
-  if (!m_ttsManager->initialize(QString(), true)) {
+  if (!m_ttsManager->initialize(QString())) {
     emit serviceError(QStringLiteral("Failed to initialize TTS."));
+  } else {
+    m_ttsReady = true;
+    emit ttsReady();
   }
 
   startEmbedder();

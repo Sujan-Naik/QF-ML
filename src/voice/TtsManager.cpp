@@ -9,37 +9,17 @@
 #include <QMediaDevices>
 #include <QNetworkProxy>
 #include <QNetworkRequest>
-#include <QRegularExpression>
-#include <QSet>
 
 TtsManager::TtsManager(QObject *parent)
     : QObject(parent), m_networkManager(new QNetworkAccessManager(this)),
-      m_audioBuffer(this), m_dockerProcess(nullptr),
-      m_healthCheckTimer(new QTimer(this)) {
+      m_audioBuffer(this) {
   m_networkManager->setProxy(QNetworkProxy::NoProxy);
 
   m_availableVoices = defaultVoices();
-
-  m_healthCheckTimer->setInterval(2000);
-
-  connect(m_healthCheckTimer, &QTimer::timeout, this,
-          &TtsManager::checkServerHealth);
 }
 
 TtsManager::~TtsManager() {
   stopAndClear();
-
-  if (m_voiceReply) {
-    m_voiceReply->abort();
-    m_voiceReply->deleteLater();
-    m_voiceReply = nullptr;
-  }
-
-  if (m_phonemeReply) {
-    m_phonemeReply->abort();
-    m_phonemeReply->deleteLater();
-    m_phonemeReply = nullptr;
-  }
 
   if (m_currentReply) {
     m_currentReply->abort();
@@ -48,8 +28,6 @@ TtsManager::~TtsManager() {
   }
 
   cleanupAudioSink();
-
-  stopDockerContainer();
 }
 
 QStringList TtsManager::defaultVoices() {
@@ -82,37 +60,25 @@ void TtsManager::refreshVoices() {
   emit voicesChanged(m_availableVoices);
 }
 
-bool TtsManager::initialize(const QString &serverUrl, bool autoStart) {
+bool TtsManager::initialize(const QString &serverUrl) {
   if (m_initialized)
     return true;
 
-  if (autoStart) {
-    if (!checkDockerAvailable()) {
-      emit errorOccurred(
-          QStringLiteral("Docker is not available or user lacks permissions."));
-
-      return false;
-    }
-
-    startDockerContainer();
-
-    m_initialized = true;
-
-    return true;
+  if (serverUrl.isEmpty()) {
+    m_serverUrl = QUrl(QStringLiteral("http://127.0.0.1:%1")
+                           .arg(DEFAULT_PORT));
+  } else {
+    m_serverUrl = QUrl(serverUrl);
   }
-
-  if (serverUrl.isEmpty())
-    return false;
-
-  m_serverUrl = QUrl(serverUrl);
 
   if (!m_serverUrl.isValid()) {
     qWarning() << "[TTS] Invalid server URL:" << serverUrl;
-
     return false;
   }
 
   m_initialized = true;
+
+  qDebug() << "[TTS] Using HeadTTS server:" << m_serverUrl.toString();
 
   return true;
 }
@@ -154,131 +120,49 @@ void TtsManager::enqueueSentence(const QString &sentence, int speakerId) {
     return;
   }
 
-  if (m_synthesisInProgress) {
-    qWarning() << "[TTS] Synthesis already in progress;"
-               << "ignoring overlapping sentence.";
-
-    return;
-  }
-
-  m_synthesisInProgress = true;
-
-  requestPhonemes(cleaned, speakerId, m_generation);
+  requestSynthesis(cleaned, speakerId, m_generation);
 }
 
-void TtsManager::requestPhonemes(const QString &text, int speakerId,
-                                 quint64 generation) {
+void TtsManager::requestSynthesis(const QString &text, int speakerId,
+                                  quint64 generation) {
   if (!m_enabled || !m_initialized || generation != m_generation) {
-    m_synthesisInProgress = false;
     return;
   }
 
   const QString url =
-      m_serverUrl.toString() + QStringLiteral("/dev/phonemize");
-
-  qDebug() << "[TTS] Phonemizing:" << text.left(60);
-
-  QJsonObject payload;
-  payload["text"] = text;
-  payload["language"] = QStringLiteral("a");
-
-  const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
-
-  QNetworkRequest request{QUrl(url)};
-
-  request.setHeader(QNetworkRequest::ContentTypeHeader,
-                    QStringLiteral("application/json"));
-
-  request.setHeader(QNetworkRequest::UserAgentHeader,
-                    QStringLiteral("TalosApp/1.0"));
-
-  QNetworkReply *reply = m_networkManager->post(request, body);
-
-  m_phonemeReply = reply;
-
-  connect(reply, &QNetworkReply::finished, this,
-          [this, reply, text, speakerId, generation]() {
-            if (m_phonemeReply == reply) {
-              m_phonemeReply = nullptr;
-            }
-
-            if (generation != m_generation) {
-              reply->deleteLater();
-              m_synthesisInProgress = false;
-              return;
-            }
-
-            QStringList wordPhonemes;
-
-            if (reply->error() == QNetworkReply::NoError) {
-              const QJsonDocument doc =
-                  QJsonDocument::fromJson(reply->readAll());
-
-              if (doc.isObject()) {
-                const QString phonemeString =
-                    doc.object().value(QStringLiteral("phonemes")).toString();
-
-                if (!phonemeString.isEmpty()) {
-                  wordPhonemes = VisemeMap::splitWords(phonemeString);
-                }
-              }
-            } else {
-              qWarning() << "[TTS] Phonemize failed:"
-                         << reply->errorString()
-                         << "- falling back to word-level visemes.";
-            }
-
-            reply->deleteLater();
-
-            synthesize(text, speakerId, generation, wordPhonemes);
-          });
-}
-
-void TtsManager::synthesize(const QString &text, int speakerId,
-                            quint64 generation,
-                            const QStringList &wordPhonemes) {
-  if (!m_enabled || !m_initialized || generation != m_generation) {
-    m_synthesisInProgress = false;
-    return;
-  }
-
-  const QString url =
-      m_serverUrl.toString() + QStringLiteral("/dev/captioned_speech");
+      m_serverUrl.toString() + QStringLiteral("/v1/synthesize");
 
   qDebug() << "[TTS] Synthesizing voice=" << m_voice
-           << "text length=" << text.length() << "generation=" << generation
-           << "phoneme words=" << wordPhonemes.size();
+           << "text length=" << text.length() << "generation=" << generation;
 
   QJsonObject payload;
 
-  payload["model"] = QStringLiteral("kokoro");
   payload["input"] = text;
   payload["voice"] = m_voice;
-  payload["response_format"] = QStringLiteral("pcm");
+  payload["language"] = QStringLiteral("en-us");
+  payload["speed"] = 1.0;
+  payload["audioEncoding"] = QStringLiteral("pcm");
 
-  const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+  const QByteArray body =
+      QJsonDocument(payload).toJson(QJsonDocument::Compact);
 
   QNetworkRequest request{QUrl(url)};
 
   request.setHeader(QNetworkRequest::ContentTypeHeader,
                     QStringLiteral("application/json"));
-
-  request.setHeader(QNetworkRequest::UserAgentHeader,
-                    QStringLiteral("TalosApp/1.0"));
 
   QNetworkReply *reply = m_networkManager->post(request, body);
 
   m_currentReply = reply;
 
   connect(reply, &QNetworkReply::finished, this,
-          [this, reply, generation, speakerId, wordPhonemes]() {
-            processReply(reply, generation, speakerId, wordPhonemes);
+          [this, reply, generation, speakerId]() {
+            processReply(reply, generation, speakerId);
           });
 }
 
 void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
-                              int speakerId,
-                              const QStringList &wordPhonemes) {
+                              int speakerId) {
   if (!reply)
     return;
 
@@ -290,16 +174,12 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
              << "reply generation=" << generation
              << "current generation=" << m_generation;
 
-    m_synthesisInProgress = false;
-
     reply->deleteLater();
 
     return;
   }
 
   if (!m_enabled) {
-    m_synthesisInProgress = false;
-
     reply->deleteLater();
 
     return;
@@ -307,8 +187,6 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
 
   if (reply->error() != QNetworkReply::NoError) {
     const QString error = reply->errorString();
-
-    m_synthesisInProgress = false;
 
     reply->deleteLater();
 
@@ -323,13 +201,11 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
   if (status != 200) {
     const QByteArray response = reply->readAll();
 
-    QString error = QStringLiteral("TTS server returned HTTP %1").arg(status);
+    QString error = QStringLiteral("HeadTTS returned HTTP %1").arg(status);
 
     if (!response.isEmpty()) {
       error += QStringLiteral(": ") + QString::fromUtf8(response);
     }
-
-    m_synthesisInProgress = false;
 
     reply->deleteLater();
 
@@ -341,11 +217,9 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
   const QByteArray payload = reply->readAll();
 
   if (payload.isEmpty()) {
-    m_synthesisInProgress = false;
-
     reply->deleteLater();
 
-    emit errorOccurred(QStringLiteral("Empty response from TTS server"));
+    emit errorOccurred(QStringLiteral("Empty response from HeadTTS"));
 
     return;
   }
@@ -353,14 +227,12 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
   AudioChunk chunk;
   QString parseError;
 
-  if (!parseCaptionedResponse(payload, speakerId, wordPhonemes, chunk,
-                              parseError)) {
-    m_synthesisInProgress = false;
-
+  if (!parseHeadTtsResponse(payload, speakerId, chunk, parseError)) {
     reply->deleteLater();
 
     emit errorOccurred(
-        QStringLiteral("TTS response could not be parsed: %1").arg(parseError));
+        QStringLiteral("HeadTTS response could not be parsed: %1")
+            .arg(parseError));
 
     return;
   }
@@ -371,8 +243,6 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
     m_audioQueue.enqueue(chunk);
   }
 
-  m_synthesisInProgress = false;
-
   emit sentenceQueued(speakerId);
   emit chunkReady(chunk);
 
@@ -382,15 +252,13 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
     playNextInQueue();
 }
 
-bool TtsManager::parseCaptionedResponse(const QByteArray &payload,
-                                        int speakerId,
-                                        const QStringList &wordPhonemes,
-                                        AudioChunk &out,
-                                        QString &error) {
+bool TtsManager::parseHeadTtsResponse(const QByteArray &payload,
+                                      int speakerId,
+                                      AudioChunk &out,
+                                      QString &error) {
   QJsonParseError parseError;
 
-  const QJsonDocument doc =
-      QJsonDocument::fromJson(payload, &parseError);
+  const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
 
   if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
     error = parseError.errorString();
@@ -406,8 +274,7 @@ bool TtsManager::parseCaptionedResponse(const QByteArray &payload,
     return false;
   }
 
-  const QByteArray audio =
-      QByteArray::fromBase64(audioB64.toUtf8());
+  const QByteArray audio = QByteArray::fromBase64(audioB64.toUtf8());
 
   if (audio.isEmpty()) {
     error = QStringLiteral("audio decoded to zero bytes");
@@ -418,119 +285,34 @@ bool TtsManager::parseCaptionedResponse(const QByteArray &payload,
   out.sampleRate = 24000;
   out.speakerId = speakerId;
   out.timestamp = QDateTime::currentMSecsSinceEpoch();
-  out.visemes.clear();
 
-  const QJsonArray timestamps =
-      object.value(QStringLiteral("timestamps")).toArray();
+  const QJsonArray visemeArray =
+      object.value(QStringLiteral("visemes")).toArray();
+  const QJsonArray vtimeArray =
+      object.value(QStringLiteral("vtimes")).toArray();
+  const QJsonArray vdurationArray =
+      object.value(QStringLiteral("vdurations")).toArray();
 
-  if (timestamps.isEmpty()) {
-    return true;
+  const int count =
+      qMin(visemeArray.size(), qMin(vtimeArray.size(), vdurationArray.size()));
+
+  QStringList visemes;
+  QVector<int> vtimes;
+  QVector<int> vdurations;
+
+  visemes.reserve(count);
+  vtimes.reserve(count);
+  vdurations.reserve(count);
+
+  for (int i = 0; i < count; ++i) {
+    visemes.append(visemeArray.at(i).toString());
+    vtimes.append(vtimeArray.at(i).toInt());
+    vdurations.append(vdurationArray.at(i).toInt());
   }
 
-  // If the phonemize step succeeded, we have one phoneme word per
-  // spoken word and can build a phoneme-level timeline. If it did
-  // not, or if the counts disagree, fall back to the word-level
-  // heuristic per word so audio is never dropped for a cosmetic
-  // step.
-  const bool havePhonemes = !wordPhonemes.isEmpty();
-
-  QVector<int> starts;
-  QVector<int> ends;
-  QStringList words;
-
-  starts.reserve(timestamps.size());
-  ends.reserve(timestamps.size());
-  words.reserve(timestamps.size());
-
-  for (const QJsonValue &value : timestamps) {
-    if (!value.isObject()) {
-      continue;
-    }
-
-    const QJsonObject entry = value.toObject();
-
-    const QString word =
-        entry.value(QStringLiteral("word")).toString().trimmed();
-
-    if (word.isEmpty()) {
-      continue;
-    }
-
-    const double startSeconds =
-        entry.value(QStringLiteral("start_time")).toDouble();
-    const double endSeconds =
-        entry.value(QStringLiteral("end_time")).toDouble();
-
-    words.append(word);
-    starts.append(static_cast<int>(startSeconds * 1000.0));
-    ends.append(static_cast<int>(endSeconds * 1000.0));
-  }
-
-  if (!havePhonemes || wordPhonemes.size() != words.size()) {
-    if (havePhonemes && wordPhonemes.size() != words.size()) {
-      qWarning() << "[TTS] Phoneme count" << wordPhonemes.size()
-                 << "does not match word count" << words.size()
-                 << "- falling back to word-level visemes.";
-    }
-
-    out.visemes.reserve(words.size());
-
-    for (int i = 0; i < words.size(); ++i) {
-      Viseme viseme;
-      viseme.startMs = starts.at(i);
-      viseme.endMs = ends.at(i);
-      viseme.shape = visemeForWord(words.at(i));
-
-      out.visemes.append(viseme);
-    }
-
-    return true;
-  }
-
-  out.visemes = VisemeMap::buildTimeline(wordPhonemes, starts, ends);
+  out.visemes = VisemeMap::buildTimeline(visemes, vtimes, vdurations);
 
   return true;
-}
-
-QString TtsManager::visemeForWord(const QString &word) {
-  const QString lower = word.toLower();
-
-  QString cleaned;
-  cleaned.reserve(lower.size());
-
-  for (QChar c : lower) {
-    if (c.isLetter()) {
-      cleaned.append(c);
-    }
-  }
-
-  if (cleaned.isEmpty()) {
-    return QStringLiteral("sil");
-  }
-
-  int a = 0, e = 0, i = 0, o = 0, u = 0;
-
-  for (QChar c : cleaned) {
-    if (c == QChar('a')) ++a;
-    else if (c == QChar('e')) ++e;
-    else if (c == QChar('i') || c == QChar('y')) ++i;
-    else if (c == QChar('o')) ++o;
-    else if (c == QChar('u')) ++u;
-  }
-
-  const int total = a + e + i + o + u;
-
-  if (total == 0) {
-    return QStringLiteral("PP");
-  }
-
-  const int maxCount = std::max({a, e, i, o, u});
-
-  if (a == maxCount) return QStringLiteral("aa");
-  if (e == maxCount) return QStringLiteral("E");
-  if (i == maxCount) return QStringLiteral("I");
-  if (o == maxCount) return QStringLiteral("O");
-  return QStringLiteral("U");
 }
 
 void TtsManager::playNextInQueue() {
@@ -676,15 +458,6 @@ void TtsManager::stopAndClear() {
   qDebug() << "[TTS] stopAndClear:"
            << "generation=" << m_generation;
 
-  m_synthesisInProgress = false;
-
-  if (m_phonemeReply) {
-    QNetworkReply *reply = m_phonemeReply;
-    m_phonemeReply = nullptr;
-    reply->abort();
-    reply->deleteLater();
-  }
-
   if (m_currentReply) {
     QNetworkReply *reply = m_currentReply;
 
@@ -720,226 +493,4 @@ int TtsManager::queueSize() const {
   QMutexLocker locker(&m_queueMutex);
 
   return m_audioQueue.size();
-}
-
-bool TtsManager::checkDockerAvailable() {
-  QProcess check;
-
-  check.start(QStringLiteral("docker"), QStringList()
-                                            << QStringLiteral("info"));
-
-  check.waitForFinished(2000);
-
-  if (check.exitCode() != 0) {
-    qWarning() << "[TTS] Docker not available.";
-
-    return false;
-  }
-
-  return true;
-}
-
-void TtsManager::startDockerContainer() {
-  QProcess check;
-
-  check.start(QStringLiteral("docker"),
-              QStringList()
-                  << QStringLiteral("ps") << QStringLiteral("--filter")
-                  << (QStringLiteral("ancestor=") +
-                      QString::fromUtf8(DOCKER_IMAGE))
-                  << QStringLiteral("--format") << QStringLiteral("{{.ID}}"));
-
-  check.waitForFinished(2000);
-
-  const QString output =
-      QString::fromUtf8(check.readAllStandardOutput()).trimmed();
-
-  if (!output.isEmpty()) {
-    m_containerId = output;
-    m_containerStarted = true;
-
-    m_serverUrl = QUrl(QStringLiteral("http://127.0.0.1:%1").arg(HOST_PORT));
-
-    m_healthAttempts = 0;
-    m_healthCheckTimer->start();
-
-    return;
-  }
-
-  QProcess inspect;
-
-  inspect.start(QStringLiteral("docker"),
-                QStringList()
-                    << QStringLiteral("image") << QStringLiteral("inspect")
-                    << QString::fromUtf8(DOCKER_IMAGE));
-
-  inspect.waitForFinished(2000);
-
-  if (inspect.exitCode() != 0)
-    pullDockerImage();
-  else
-    runDockerContainer();
-}
-
-void TtsManager::pullDockerImage() {
-  if (m_dockerProcess)
-    m_dockerProcess->deleteLater();
-
-  m_dockerProcess = new QProcess(this);
-
-  connect(m_dockerProcess, &QProcess::finished, this,
-          &TtsManager::onDockerPullFinished);
-
-  connect(m_dockerProcess, &QProcess::readyReadStandardOutput, this,
-          &TtsManager::onDockerOutputReady);
-
-  connect(m_dockerProcess, &QProcess::readyReadStandardError, this,
-          &TtsManager::onDockerErrorReady);
-
-  m_dockerProcess->start(QStringLiteral("docker"),
-                         QStringList() << QStringLiteral("pull")
-                                       << QString::fromUtf8(DOCKER_IMAGE));
-}
-
-void TtsManager::onDockerPullFinished(int exitCode,
-                                      QProcess::ExitStatus status) {
-  if (exitCode != 0 || status != QProcess::NormalExit) {
-    emit errorOccurred(QStringLiteral("Failed to pull Docker image."));
-
-    return;
-  }
-
-  runDockerContainer();
-}
-
-void TtsManager::runDockerContainer() {
-  if (m_dockerProcess)
-    m_dockerProcess->deleteLater();
-
-  m_dockerProcess = new QProcess(this);
-
-  connect(m_dockerProcess, &QProcess::finished, this,
-          &TtsManager::onDockerRunFinished);
-
-  connect(m_dockerProcess, &QProcess::readyReadStandardOutput, this,
-          &TtsManager::onDockerOutputReady);
-
-  connect(m_dockerProcess, &QProcess::readyReadStandardError, this,
-          &TtsManager::onDockerErrorReady);
-
-  QStringList args;
-
-  args << QStringLiteral("run") << QStringLiteral("--rm")
-       << QStringLiteral("-d") << QStringLiteral("--device=/dev/kfd")
-       << QStringLiteral("--device=/dev/dri") << QStringLiteral("-e")
-       << (QStringLiteral("HSA_OVERRIDE_GFX_VERSION=") +
-           QString::fromUtf8(GFX_VERSION))
-       << QStringLiteral("-p")
-       << QStringLiteral("%1:%2").arg(HOST_PORT).arg(CONTAINER_PORT)
-       << QString::fromUtf8(DOCKER_IMAGE);
-
-  m_dockerProcess->start(QStringLiteral("docker"), args);
-
-  m_containerStarted = true;
-}
-
-void TtsManager::onDockerRunFinished(int exitCode,
-                                     QProcess::ExitStatus status) {
-  if (exitCode != 0 || status != QProcess::NormalExit) {
-    emit errorOccurred(QStringLiteral("Failed to start Docker container."));
-
-    return;
-  }
-
-  if (m_containerId.isEmpty()) {
-    const QString output =
-        QString::fromUtf8(m_dockerProcess->readAllStandardOutput()).trimmed();
-
-    if (!output.isEmpty())
-      m_containerId = output;
-  }
-
-  m_serverUrl = QUrl(QStringLiteral("http://127.0.0.1:%1").arg(HOST_PORT));
-
-  m_healthAttempts = 0;
-  m_healthCheckTimer->start();
-}
-
-void TtsManager::onDockerOutputReady() {
-  if (!m_dockerProcess)
-    return;
-
-  const QByteArray data = m_dockerProcess->readAllStandardOutput();
-
-  if (!data.isEmpty())
-    qDebug() << "[Docker stdout]" << data;
-}
-
-void TtsManager::onDockerErrorReady() {
-  if (!m_dockerProcess)
-    return;
-
-  const QByteArray data = m_dockerProcess->readAllStandardError();
-
-  if (!data.isEmpty())
-    qWarning() << "[Docker stderr]" << data;
-}
-
-void TtsManager::checkServerHealth() {
-  if (m_serverUrl.isEmpty()) {
-    m_serverUrl = QUrl(QStringLiteral("http://127.0.0.1:%1").arg(HOST_PORT));
-  }
-
-  const QUrl healthUrl = m_serverUrl.resolved(QUrl(QStringLiteral("/health")));
-
-  QNetworkRequest request{healthUrl};
-
-  request.setHeader(QNetworkRequest::UserAgentHeader,
-                    QStringLiteral("TalosApp/1.0"));
-
-  QNetworkReply *reply = m_networkManager->get(request);
-
-  connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-    if (reply->error() == QNetworkReply::NoError) {
-      const int status =
-          reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-
-      if (status == 200) {
-        m_healthCheckTimer->stop();
-
-        emit serverReady();
-
-        reply->deleteLater();
-
-        return;
-      }
-    }
-
-    ++m_healthAttempts;
-
-    if (m_healthAttempts >= MAX_HEALTH_ATTEMPTS) {
-      m_healthCheckTimer->stop();
-
-      emit errorOccurred(
-          QStringLiteral("TTS server did not become ready within timeout."));
-    }
-
-    reply->deleteLater();
-  });
-}
-
-void TtsManager::stopDockerContainer() {
-  if (!m_containerStarted || m_containerId.isEmpty()) {
-    return;
-  }
-
-  QProcess stop;
-
-  stop.start(QStringLiteral("docker"),
-             QStringList() << QStringLiteral("stop") << m_containerId);
-
-  stop.waitForFinished(3000);
-
-  m_containerStarted = false;
-  m_containerId.clear();
 }

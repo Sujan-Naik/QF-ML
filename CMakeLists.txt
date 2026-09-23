@@ -29,6 +29,17 @@ qt_standard_project_setup()
 
 include(FetchContent)
 
+# nvm installs Node under ~/.nvm/versions/node/<version>/bin.
+# find_program does not look there by default because CLion launches
+# CMake with a PATH that predates nvm. Glob every installed version so
+# a Node version bump is picked up automatically.
+file(
+        GLOB
+        NVM_NODE_BINS
+        "$ENV{HOME}/.nvm/versions/node/*/bin"
+)
+
+
 # =============================================================================
 # 1. NeMo-Speech.cpp
 # =============================================================================
@@ -236,20 +247,6 @@ set(
 # =============================================================================
 # 1A. Embedded NeMo include path
 # =============================================================================
-#
-# NeMo's current src/asr/CMakeLists.txt gives nemo_speech_asr_c:
-#
-#   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-#
-# When embedded in QF-ML, CMAKE_SOURCE_DIR refers to QF-ML.
-#
-# c_api.cpp includes:
-#
-#   #include "nemo_speech/asr.h"
-#
-# Therefore NeMo's public include directory must be made visible from the
-# parent directory before add_subdirectory().
-# =============================================================================
 
 include_directories(
         BEFORE
@@ -258,23 +255,6 @@ include_directories(
 
 # =============================================================================
 # 1B. Vulkan-Headers compatibility patch
-# =============================================================================
-#
-# Your Debian installation provides Vulkan headers that predate the
-# VK_EXT_layer_settings Vulkan-Hpp declarations used by the vendored ggml
-# Vulkan backend.
-#
-# The following symbols fail to compile on older Vulkan-Hpp:
-#
-#   vk::LayerSettingEXT
-#   vk::LayerSettingTypeEXT
-#   vk::LayerSettingsCreateInfoEXT
-#
-# The extension is optional. When the headers do not expose it, use ordinary
-# vk::InstanceCreateInfo without the pNext chain.
-#
-# The patch is applied only when the problematic source is present, so once
-# NVIDIA removes the incompatibility this CMake becomes a no-op automatically.
 # =============================================================================
 
 set(
@@ -300,10 +280,6 @@ if (EXISTS "${NEMO_VULKAN_CPP}")
                 "Applying NeMo ggml Vulkan-Headers compatibility patch."
         )
 
-        # ---------------------------------------------------------------------
-        # Guard VK_EXT_layer_settings extension advertisement.
-        # ---------------------------------------------------------------------
-
         string(
                 REPLACE
 
@@ -314,14 +290,6 @@ if (EXISTS "${NEMO_VULKAN_CPP}")
                 NEMO_VULKAN_CONTENT
                 "${NEMO_VULKAN_CONTENT}"
         )
-
-        # ---------------------------------------------------------------------
-        # Guard the Vulkan-Hpp LayerSettings structures.
-        # ---------------------------------------------------------------------
-        #
-        # This matches the implementation used by the currently failing
-        # NeMo/ggml source.
-        # ---------------------------------------------------------------------
 
         string(
                 REPLACE
@@ -373,6 +341,7 @@ add_subdirectory(
         "${CMAKE_CURRENT_BINARY_DIR}/nemo-speech"
         EXCLUDE_FROM_ALL
 )
+
 if (NOT TARGET nemo_speech_asr)
 
     message(
@@ -519,18 +488,6 @@ set_target_properties(
 
 # =============================================================================
 # 3. Shared QF data directory
-# =============================================================================
-#
-# The model root is <dataRoot>/qf-ml/models, where dataRoot is the
-# platform-specific application data directory:
-#
-#   Linux:   $XDG_DATA_HOME/Questfarer, or $HOME/.local/share/Questfarer
-#   macOS:   $HOME/Library/Application Support/Questfarer
-#   Windows: %LOCALAPPDATA%/Questfarer
-#
-# This must match QFPaths::dataRoot() in include/app/QfPaths.h on every
-# platform. The two are one contract: if one changes, the other must change
-# with it.
 # =============================================================================
 
 if (WIN32)
@@ -866,22 +823,6 @@ endfunction()
 # =============================================================================
 # 3D. ASR model selection
 # =============================================================================
-#
-# NVIDIA's current model index defines four ASR models:
-#
-#   nemotron-3.5
-#   nemotron-en
-#   parakeet-ctc
-#   parakeet-tdt
-#
-# Only the selected model is downloaded.
-#
-# All selected models are stored in:
-#
-#   ${MODELS_DIR}/stt
-#
-# which is shared across applications.
-# =============================================================================
 
 set(
         QF_STT_MODEL
@@ -1051,16 +992,6 @@ endforeach ()
 # =============================================================================
 # 3F. Embedding model (all-MiniLM-L6-v2, INT8 quantized)
 # =============================================================================
-#
-# Used by Lore for semantic search over the notes vault.
-#
-# Files:
-#   model_quantized.onnx  ~23 MB
-#   vocab.txt             ~232 KB
-#
-# Both are hosted on Hugging Face. The quantized model is from the
-# Xenova export; the vocab is from the original sentence-transformers
-# repo. They are the pair the model was trained with.
 
 set(
         QF_EMBEDDING_DIR
@@ -1071,6 +1002,7 @@ file(
         MAKE_DIRECTORY
         "${QF_EMBEDDING_DIR}"
 )
+
 download_hf_model(
         "Xenova/all-MiniLM-L6-v2"
         "onnx/model_quantized.onnx"
@@ -1089,7 +1021,421 @@ message(
         STATUS
         "Embedding model directory: ${QF_EMBEDDING_DIR}"
 )
+# =============================================================================
+# 3G. HeadTTS (Kokoro with native visemes and timestamps)
+# =============================================================================
+#
+# HeadTTS is a Node.js server that runs the timestamped Kokoro ONNX
+# model and returns native Oculus 15 visemes with per-phoneme timing.
+#
+# This block does four things:
+#
+#   1. Clones met4citizen/HeadTTS if not already present.
+#   2. Runs npm install and installs the "ws" package, which
+#      headtts-node.mjs imports but package.json does not declare.
+#   3. Writes a config file tuned for QF-ML.
+#   4. Writes a start.sh wrapper and a CMake target "headtts-run" so
+#      the server can be launched from the CLion run configuration
+#      dropdown.
+#
+# The server is not started at build time. Start it with:
+#
+#   external/HeadTTS/start.sh
+#
+# or by selecting the headtts-run target in CLion.
+#
+# Idempotency is guarded by three sentinels:
+#
+#   external/HeadTTS/.git                 -> clone succeeded
+#   external/HeadTTS/node_modules/.package-lock.json -> npm install succeeded
+#   external/HeadTTS/node_modules/ws      -> ws install succeeded
+#
+# A failed step on any prior configure will be retried on the next.
+# =============================================================================
 
+set(
+        HEADTTS_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/HeadTTS"
+)
+
+set(
+        HEADTTS_CONFIG
+        "${HEADTTS_DIR}/headtts-node.json"
+)
+
+set(
+        HEADTTS_START_SCRIPT
+        "${HEADTTS_DIR}/start.sh"
+)
+
+set(
+        HEADTTS_NPM_SENTINEL
+        "${HEADTTS_DIR}/node_modules/.package-lock.json"
+)
+
+set(
+        HEADTTS_WS_SENTINEL
+        "${HEADTTS_DIR}/node_modules/ws"
+)
+
+set(
+        HEADTTS_CLONE_SENTINEL
+        "${HEADTTS_DIR}/.git"
+)
+
+find_program(
+        NODE_CLI
+        NAMES node
+        PATHS ${NVM_NODE_BINS}
+)
+
+find_program(
+        NPM_CLI
+        NAMES npm
+        PATHS ${NVM_NODE_BINS}
+)
+
+if (NODE_CLI AND NPM_CLI)
+
+    message(
+            STATUS
+            "Node.js found: ${NODE_CLI}"
+    )
+
+    # -------------------------------------------------------------------------
+    # 1. Clone
+    # -------------------------------------------------------------------------
+
+    if (NOT EXISTS "${HEADTTS_CLONE_SENTINEL}")
+
+        message(
+                STATUS
+                "Cloning HeadTTS into ${HEADTTS_DIR}..."
+        )
+
+        execute_process(
+                COMMAND
+                git
+                clone
+                --depth
+                1
+                https://github.com/met4citizen/HeadTTS
+                "${HEADTTS_DIR}"
+
+                RESULT_VARIABLE
+                clone_result
+
+                OUTPUT_VARIABLE
+                clone_output
+
+                ERROR_VARIABLE
+                clone_error
+        )
+
+        if (NOT clone_result EQUAL 0)
+
+            message(
+                    WARNING
+                    "Failed to clone HeadTTS."
+            )
+
+            message(
+                    WARNING
+                    "stdout:\n${clone_output}"
+            )
+
+            message(
+                    WARNING
+                    "stderr:\n${clone_error}"
+            )
+
+        endif ()
+
+    endif ()
+
+    # -------------------------------------------------------------------------
+    # 2. npm install
+    # -------------------------------------------------------------------------
+    #
+    # The sentinel is .package-lock.json inside node_modules, not the
+    # node_modules directory itself. npm writes that file only when
+    # install succeeds, so a partial install will be retried.
+    # -------------------------------------------------------------------------
+
+    if (EXISTS "${HEADTTS_DIR}/package.json"
+            AND NOT EXISTS "${HEADTTS_NPM_SENTINEL}")
+
+        message(
+                STATUS
+                "Running npm install for HeadTTS..."
+        )
+
+        execute_process(
+                COMMAND
+                ${NPM_CLI}
+                install
+
+                WORKING_DIRECTORY
+                "${HEADTTS_DIR}"
+
+                RESULT_VARIABLE
+                npm_result
+
+                OUTPUT_VARIABLE
+                npm_output
+
+                ERROR_VARIABLE
+                npm_error
+        )
+
+        if (NOT npm_result EQUAL 0)
+
+            message(
+                    WARNING
+                    "npm install failed for HeadTTS."
+            )
+
+            message(
+                    WARNING
+                    "stdout:\n${npm_output}"
+            )
+
+            message(
+                    WARNING
+                    "stderr:\n${npm_error}"
+            )
+
+        endif ()
+
+    endif ()
+
+    # -------------------------------------------------------------------------
+    # 3. ws package
+    # -------------------------------------------------------------------------
+    #
+    # headtts-node.mjs imports "ws", but package.json does not declare
+    # it. Install it explicitly. This is the one dependency that has
+    # caused the "Cannot find package 'ws'" startup failure.
+    # -------------------------------------------------------------------------
+
+    if (EXISTS "${HEADTTS_NPM_SENTINEL}"
+            AND NOT EXISTS "${HEADTTS_WS_SENTINEL}")
+
+        message(
+                STATUS
+                "Installing missing ws dependency for HeadTTS..."
+        )
+
+        execute_process(
+                COMMAND
+                ${NPM_CLI}
+                install
+                ws
+
+                WORKING_DIRECTORY
+                "${HEADTTS_DIR}"
+
+                RESULT_VARIABLE
+                ws_result
+
+                OUTPUT_VARIABLE
+                ws_output
+
+                ERROR_VARIABLE
+                ws_error
+        )
+
+        if (NOT ws_result EQUAL 0)
+
+            message(
+                    WARNING
+                    "Failed to install ws for HeadTTS."
+            )
+
+            message(
+                    WARNING
+                    "stdout:\n${ws_output}"
+            )
+
+            message(
+                    WARNING
+                    "stderr:\n${ws_error}"
+            )
+
+        endif ()
+
+    endif ()
+
+    # -------------------------------------------------------------------------
+    # 4. Config
+    # -------------------------------------------------------------------------
+    #
+    # Written once, on first configure. Subsequent configures leave it
+    # alone so manual edits are not overwritten.
+    # -------------------------------------------------------------------------
+
+    if (EXISTS "${HEADTTS_NPM_SENTINEL}"
+            AND NOT EXISTS "${HEADTTS_CONFIG}")
+
+        file(
+                WRITE
+                "${HEADTTS_CONFIG}"
+                "{\n"
+                "  \"server\": {\n"
+                "    \"port\": 8882,\n"
+                "    \"websocket\": true,\n"
+                "    \"rest\": true,\n"
+                "    \"corsOrigin\": \"*\"\n"
+                "  },\n"
+                "  \"tts\": {\n"
+                "    \"threads\": 2,\n"
+                "    \"model\": \"onnx-community/Kokoro-82M-v1.0-ONNX-timestamped\",\n"
+                "    \"dtype\": \"q8\",\n"
+                "    \"device\": \"cpu\",\n"
+                "    \"languages\": [\"en-us\"],\n"
+                "    \"voices\": [\"af_bella\"],\n"
+                "    \"defaults\": {\n"
+                "      \"voice\": \"af_bella\",\n"
+                "      \"language\": \"en-us\",\n"
+                "      \"speed\": 1,\n"
+                "      \"audioEncoding\": \"pcm\"\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+        )
+
+        message(
+                STATUS
+                "Wrote HeadTTS config: ${HEADTTS_CONFIG}"
+        )
+
+    endif ()
+
+    # -------------------------------------------------------------------------
+    # 5. start.sh
+    # -------------------------------------------------------------------------
+
+    if (EXISTS "${HEADTTS_NPM_SENTINEL}"
+            AND NOT EXISTS "${HEADTTS_START_SCRIPT}")
+
+        file(
+                WRITE
+                "${HEADTTS_START_SCRIPT}"
+                "#!/usr/bin/env bash\n"
+                "# Generated by CMake. Runs the HeadTTS server.\n"
+                "set -euo pipefail\n"
+                "\n"
+                "cd \"$(dirname \"$0\")\"\n"
+                "\n"
+                "if [ ! -d node_modules ]; then\n"
+                "  echo \"HeadTTS: node_modules missing, running npm install\" >&2\n"
+                "  npm install\n"
+                "fi\n"
+                "\n"
+                "exec npm start\n"
+        )
+
+        file(
+                CHMOD
+                "${HEADTTS_START_SCRIPT}"
+                PERMISSIONS
+                OWNER_READ
+                OWNER_WRITE
+                OWNER_EXECUTE
+                GROUP_READ
+                GROUP_EXECUTE
+                WORLD_READ
+                WORLD_EXECUTE
+        )
+
+        message(
+                STATUS
+                "Wrote HeadTTS start script: ${HEADTTS_START_SCRIPT}"
+        )
+
+    endif ()
+
+    # -------------------------------------------------------------------------
+    # 6. headtts-run target
+    # -------------------------------------------------------------------------
+    #
+    # A CMake target CLion can launch. Select "headtts-run" in the run
+    # configuration dropdown and press the green arrow.
+    #
+    # The target is a custom target with a command that runs the start
+    # script. It is USES_TERMINAL so CLion routes stdout to the run
+    # console and keeps the process alive.
+    # -------------------------------------------------------------------------
+
+    if (EXISTS "${HEADTTS_START_SCRIPT}")
+
+        add_custom_target(
+                headtts-run
+
+                COMMAND
+                "${HEADTTS_START_SCRIPT}"
+
+                WORKING_DIRECTORY
+                "${HEADTTS_DIR}"
+
+                USES_TERMINAL
+
+                COMMENT
+                "Starting HeadTTS server on http://127.0.0.1:8882"
+
+                VERBATIM
+        )
+
+        message(
+                STATUS
+                ""
+        )
+
+        message(
+                STATUS
+                "HeadTTS is installed."
+        )
+
+        message(
+                STATUS
+                "Run it with the headtts-run target in CLion,"
+        )
+
+        message(
+                STATUS
+                "or: ${HEADTTS_START_SCRIPT}"
+        )
+
+        message(
+                STATUS
+                "It listens on http://127.0.0.1:8882"
+        )
+
+        message(
+                STATUS
+                "First start downloads the timestamped Kokoro model (~90 MB)."
+        )
+
+        message(
+                STATUS
+                ""
+        )
+
+    endif ()
+
+else ()
+
+    message(
+            STATUS
+            "Node.js or npm not found. HeadTTS will not be installed."
+    )
+
+    message(
+            STATUS
+            "Install Node.js v20 or later, then re-run CMake."
+    )
+
+endif ()
 # =============================================================================
 # 4. OCR Libraries
 # =============================================================================
@@ -1188,8 +1534,9 @@ add_library(
         include/embedding/EmbeddingModel.h
         src/embedding/WordPieceTokenizer.cpp
         src/embedding/EmbeddingModel.cpp
-        include/voice/VisemeMap.cpp
+
         include/voice/VisemeMap.h
+        src/voice/VisemeMap.cpp
 )
 
 target_include_directories(
@@ -1239,9 +1586,6 @@ add_dependencies(
 # =============================================================================
 # 6. qf-ml-demo
 # =============================================================================
-#
-# Explicitly kept as a normal executable target so CLion can discover it.
-# =============================================================================
 
 qt_add_executable(
         qf-ml-demo
@@ -1262,9 +1606,6 @@ target_link_libraries(
 
         Qt6::WebChannel
 )
-
-# NeMo-Speech.cpp sets the global runtime/library output directory.
-# Reassert the demo output directory explicitly.
 
 set_target_properties(
         qf-ml-demo
@@ -1545,6 +1886,27 @@ message(
         STATUS
         "Demo target: qf-ml-demo"
 )
+
+if (NODE_CLI AND NPM_CLI AND EXISTS "${HEADTTS_DIR}/package.json")
+
+    message(
+            STATUS
+            "HeadTTS:     ${HEADTTS_DIR}"
+    )
+
+    message(
+            STATUS
+            "HeadTTS URL: http://127.0.0.1:8882"
+    )
+
+else ()
+
+    message(
+            STATUS
+            "HeadTTS:     not installed"
+    )
+
+endif ()
 
 message(
         STATUS
