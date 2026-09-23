@@ -56,6 +56,174 @@ QByteArray resampleLinear(const QByteArray &input, int srcRate,
 
 } // namespace
 
+extern "C" {
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavformat/avformat.h>
+#include <libavutil/opt.h>
+#include <libavutil/samplefmt.h>
+#include <libavutil/channel_layout.h>
+}
+
+namespace {
+
+// Pitch-shift mono Int16 PCM by `semitones` (positive is higher),
+// preserving duration and sample rate. Uses FFmpeg's asetrate to
+// declare a shifted rate, then aresample to bring the rate back.
+// Returns the original data unchanged on any failure.
+QByteArray pitchShift(const QByteArray &input, int sampleRate,
+                      double semitones) {
+  if (qFuzzyIsNull(semitones) || input.isEmpty() || sampleRate <= 0) {
+    return input;
+  }
+
+  // Clamp to one octave either way; beyond that the artefact is worse
+  // than the effect.
+  semitones = qBound(-12.0, semitones, 12.0);
+
+  const double ratio = std::pow(2.0, semitones / 12.0);
+  const int shiftedRate = qRound(sampleRate * ratio);
+
+  // Build the filter graph. asetrate changes the declared rate, which
+  // raises pitch; aresample returns to the original rate, which
+  // restores duration.
+  const QString filterDesc =
+      QStringLiteral("asetrate=%1,aresample=%2")
+          .arg(shiftedRate)
+          .arg(sampleRate);
+
+  AVFilterGraph *graph = avfilter_graph_alloc();
+  if (!graph) {
+    return input;
+  }
+
+  const AVFilter *buffersrc = avfilter_get_by_name("abuffer");
+  const AVFilter *buffersink = avfilter_get_by_name("abuffersink");
+  if (!buffersrc || !buffersink) {
+    avfilter_graph_free(&graph);
+    return input;
+  }
+
+  // abuffer input descriptor. fltp is required by the filter chain.
+  const QString srcArgs = QStringLiteral(
+      "time_base=1/%1:sample_rate=%1:sample_fmt=fltp:channel_layout=mono")
+      .arg(sampleRate);
+
+  AVFilterContext *srcCtx = nullptr;
+  AVFilterContext *sinkCtx = nullptr;
+
+  if (avfilter_graph_create_filter(&srcCtx, buffersrc, "in",
+                                   srcArgs.toUtf8().constData(),
+                                   nullptr, graph) < 0) {
+    avfilter_graph_free(&graph);
+    return input;
+  }
+
+  if (avfilter_graph_create_filter(&sinkCtx, buffersink, "out",
+                                   nullptr, nullptr, graph) < 0) {
+    avfilter_graph_free(&graph);
+    return input;
+  }
+
+  AVFilterInOut *outputs = avfilter_inout_alloc();
+  AVFilterInOut *inputs = avfilter_inout_alloc();
+
+  outputs->name = av_strdup("in");
+  outputs->filter_ctx = srcCtx;
+  outputs->pad_idx = 0;
+  outputs->next = nullptr;
+
+  inputs->name = av_strdup("out");
+  inputs->filter_ctx = sinkCtx;
+  inputs->pad_idx = 0;
+  inputs->next = nullptr;
+
+  if (avfilter_graph_parse_ptr(graph, filterDesc.toUtf8().constData(),
+                               &inputs, &outputs, nullptr) < 0) {
+    avfilter_inout_free(&inputs);
+    avfilter_inout_free(&outputs);
+    avfilter_graph_free(&graph);
+    return input;
+  }
+
+  avfilter_inout_free(&inputs);
+  avfilter_inout_free(&outputs);
+
+  if (avfilter_graph_config(graph, nullptr) < 0) {
+    avfilter_graph_free(&graph);
+    return input;
+  }
+
+  // Convert the Int16 input to a float planar frame.
+  const int srcSamples = input.size() / static_cast<int>(sizeof(int16_t));
+  const auto *src = reinterpret_cast<const int16_t *>(input.constData());
+
+  AVFrame *frame = av_frame_alloc();
+  frame->format = AV_SAMPLE_FMT_FLTP;
+  frame->channel_layout = AV_CH_LAYOUT_MONO;
+  frame->sample_rate = sampleRate;
+  frame->nb_samples = srcSamples;
+
+  if (av_frame_get_buffer(frame, 0) < 0) {
+    av_frame_free(&frame);
+    avfilter_graph_free(&graph);
+    return input;
+  }
+
+  auto *dst = reinterpret_cast<float *>(frame->data[0]);
+  for (int i = 0; i < srcSamples; ++i) {
+    dst[i] = static_cast<float>(src[i]) / 32768.0f;
+  }
+
+  if (av_buffersrc_add_frame_flags(srcCtx, frame,
+                                   AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
+    av_frame_free(&frame);
+    avfilter_graph_free(&graph);
+    return input;
+  }
+
+  av_frame_free(&frame);
+
+  // Pull frames from the sink and append them.
+  QByteArray out;
+
+  while (true) {
+    AVFrame *outFrame = av_frame_alloc();
+    const int ret = av_buffersink_get_frame(sinkCtx, outFrame);
+
+    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+      av_frame_free(&outFrame);
+      break;
+    }
+
+    if (ret < 0) {
+      av_frame_free(&outFrame);
+      break;
+    }
+
+    const int n = outFrame->nb_samples;
+    const auto *p = reinterpret_cast<const float *>(outFrame->data[0]);
+
+    const int offset = out.size();
+    out.resize(offset + n * static_cast<int>(sizeof(int16_t)));
+    auto *q = reinterpret_cast<int16_t *>(out.data() + offset);
+
+    for (int i = 0; i < n; ++i) {
+      q[i] = static_cast<int16_t>(
+          qBound(-1.0f, p[i], 1.0f) * 32767.0f);
+    }
+
+    av_frame_free(&outFrame);
+  }
+
+  avfilter_graph_free(&graph);
+
+  return out.isEmpty() ? input : out;
+}
+
+} // namespace
+
 
 TtsManager::TtsManager(QObject *parent)
     : QObject(parent), m_audioBuffer(this) {
@@ -353,7 +521,7 @@ void TtsManager::sendSetupMessage() {
   QJsonObject data;
   data["voice"] = m_voice;
   data["language"] = language;
-  data["speed"] = 1.0;
+  data["speed"] = 1;
   data["audioEncoding"] = audioEncoding;
 
   QJsonObject message;
@@ -615,6 +783,10 @@ void TtsManager::playNextInQueue() {
                << "Hz is not supported; using"
                << actual.sampleRate() << "Hz";
   }
+
+  // Pitch shift if configured. The chunk rate is unchanged by this
+  // operation; only the frequency content moves.
+  chunk.data = pitchShift(chunk.data, chunk.sampleRate, 4.0);
 
   // Resample the chunk to the sink rate if they differ. Without this,
   // a 24 kHz chunk played on a 48 kHz sink runs at double speed.

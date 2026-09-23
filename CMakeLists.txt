@@ -969,7 +969,9 @@ target_link_libraries(
         Qt6::Multimedia
         Qt6::TextToSpeech
         Qt6::WebSockets
-
+        avfilter
+        avformat
+        avutil
         PRIVATE
 
         nemo_speech_asr_c
