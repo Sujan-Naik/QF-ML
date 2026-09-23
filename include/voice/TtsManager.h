@@ -1,6 +1,8 @@
 #ifndef TTSMANAGER_H
 #define TTSMANAGER_H
 
+#include "VisemeMap.h"
+
 #include <QAudioSink>
 #include <QBuffer>
 #include <QDateTime>
@@ -16,25 +18,6 @@
 #include <QVector>
 
 #include <memory>
-
-// A single mouth shape with a time range, relative to the start of the
-// audio in the enclosing AudioChunk. Times are milliseconds.
-struct Viseme {
-  int startMs = 0;
-  int endMs = 0;
-  QString shape;   // "A", "E", "I", "O", "U", "M", "sil"
-};
-
-struct AudioChunk {
-  QByteArray data;
-  int sampleRate = 24000;
-  int speakerId = 0;
-  qint64 timestamp = 0;
-
-  // Populated by the captioned speech path. Empty when the chunk came
-  // from the plain synthesis path.
-  QVector<Viseme> visemes;
-};
 
 class TtsManager : public QObject {
   Q_OBJECT
@@ -101,9 +84,18 @@ private slots:
   void checkServerHealth();
 
 private:
-  void requestSynthesis(const QString &text, int speakerId, quint64 generation);
+  // The two-step synthesis flow. requestPhonemes fetches the IPA
+  // phoneme sequence for the sentence; when it arrives, synthesize
+  // posts to the captioned speech endpoint; when that arrives,
+  // processReply builds the viseme timeline from the phonemes and the
+  // word timestamps.
+  void requestPhonemes(const QString &text, int speakerId,
+                       quint64 generation);
+  void synthesize(const QString &text, int speakerId, quint64 generation,
+                  const QStringList &wordPhonemes);
 
-  void processReply(QNetworkReply *reply, quint64 generation, int speakerId);
+  void processReply(QNetworkReply *reply, quint64 generation, int speakerId,
+                    const QStringList &wordPhonemes);
 
   void finishCurrentPlayback();
 
@@ -119,6 +111,7 @@ private:
 
   static bool parseCaptionedResponse(const QByteArray &payload,
                                      int speakerId,
+                                     const QStringList &wordPhonemes,
                                      AudioChunk &out,
                                      QString &error);
 
@@ -133,6 +126,7 @@ private:
 
   QNetworkReply *m_currentReply = nullptr;
   QNetworkReply *m_voiceReply = nullptr;
+  QNetworkReply *m_phonemeReply = nullptr;
 
   std::unique_ptr<QAudioSink> m_audioSink;
 

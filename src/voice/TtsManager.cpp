@@ -1,5 +1,7 @@
 #include "../../include/voice/TtsManager.h"
 
+#include "../../include/voice/VisemeMap.h"
+
 #include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -31,6 +33,12 @@ TtsManager::~TtsManager() {
     m_voiceReply->abort();
     m_voiceReply->deleteLater();
     m_voiceReply = nullptr;
+  }
+
+  if (m_phonemeReply) {
+    m_phonemeReply->abort();
+    m_phonemeReply->deleteLater();
+    m_phonemeReply = nullptr;
   }
 
   if (m_currentReply) {
@@ -155,11 +163,80 @@ void TtsManager::enqueueSentence(const QString &sentence, int speakerId) {
 
   m_synthesisInProgress = true;
 
-  requestSynthesis(cleaned, speakerId, m_generation);
+  requestPhonemes(cleaned, speakerId, m_generation);
 }
 
-void TtsManager::requestSynthesis(const QString &text, int speakerId,
-                                  quint64 generation) {
+void TtsManager::requestPhonemes(const QString &text, int speakerId,
+                                 quint64 generation) {
+  if (!m_enabled || !m_initialized || generation != m_generation) {
+    m_synthesisInProgress = false;
+    return;
+  }
+
+  const QString url =
+      m_serverUrl.toString() + QStringLiteral("/dev/phonemize");
+
+  qDebug() << "[TTS] Phonemizing:" << text.left(60);
+
+  QJsonObject payload;
+  payload["text"] = text;
+  payload["language"] = QStringLiteral("a");
+
+  const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+
+  QNetworkRequest request{QUrl(url)};
+
+  request.setHeader(QNetworkRequest::ContentTypeHeader,
+                    QStringLiteral("application/json"));
+
+  request.setHeader(QNetworkRequest::UserAgentHeader,
+                    QStringLiteral("TalosApp/1.0"));
+
+  QNetworkReply *reply = m_networkManager->post(request, body);
+
+  m_phonemeReply = reply;
+
+  connect(reply, &QNetworkReply::finished, this,
+          [this, reply, text, speakerId, generation]() {
+            if (m_phonemeReply == reply) {
+              m_phonemeReply = nullptr;
+            }
+
+            if (generation != m_generation) {
+              reply->deleteLater();
+              m_synthesisInProgress = false;
+              return;
+            }
+
+            QStringList wordPhonemes;
+
+            if (reply->error() == QNetworkReply::NoError) {
+              const QJsonDocument doc =
+                  QJsonDocument::fromJson(reply->readAll());
+
+              if (doc.isObject()) {
+                const QString phonemeString =
+                    doc.object().value(QStringLiteral("phonemes")).toString();
+
+                if (!phonemeString.isEmpty()) {
+                  wordPhonemes = VisemeMap::splitWords(phonemeString);
+                }
+              }
+            } else {
+              qWarning() << "[TTS] Phonemize failed:"
+                         << reply->errorString()
+                         << "- falling back to word-level visemes.";
+            }
+
+            reply->deleteLater();
+
+            synthesize(text, speakerId, generation, wordPhonemes);
+          });
+}
+
+void TtsManager::synthesize(const QString &text, int speakerId,
+                            quint64 generation,
+                            const QStringList &wordPhonemes) {
   if (!m_enabled || !m_initialized || generation != m_generation) {
     m_synthesisInProgress = false;
     return;
@@ -169,7 +246,8 @@ void TtsManager::requestSynthesis(const QString &text, int speakerId,
       m_serverUrl.toString() + QStringLiteral("/dev/captioned_speech");
 
   qDebug() << "[TTS] Synthesizing voice=" << m_voice
-           << "text length=" << text.length() << "generation=" << generation;
+           << "text length=" << text.length() << "generation=" << generation
+           << "phoneme words=" << wordPhonemes.size();
 
   QJsonObject payload;
 
@@ -193,13 +271,14 @@ void TtsManager::requestSynthesis(const QString &text, int speakerId,
   m_currentReply = reply;
 
   connect(reply, &QNetworkReply::finished, this,
-          [this, reply, generation, speakerId]() {
-            processReply(reply, generation, speakerId);
+          [this, reply, generation, speakerId, wordPhonemes]() {
+            processReply(reply, generation, speakerId, wordPhonemes);
           });
 }
 
 void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
-                              int speakerId) {
+                              int speakerId,
+                              const QStringList &wordPhonemes) {
   if (!reply)
     return;
 
@@ -274,7 +353,8 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
   AudioChunk chunk;
   QString parseError;
 
-  if (!parseCaptionedResponse(payload, speakerId, chunk, parseError)) {
+  if (!parseCaptionedResponse(payload, speakerId, wordPhonemes, chunk,
+                              parseError)) {
     m_synthesisInProgress = false;
 
     reply->deleteLater();
@@ -304,6 +384,7 @@ void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
 
 bool TtsManager::parseCaptionedResponse(const QByteArray &payload,
                                         int speakerId,
+                                        const QStringList &wordPhonemes,
                                         AudioChunk &out,
                                         QString &error) {
   QJsonParseError parseError;
@@ -342,7 +423,24 @@ bool TtsManager::parseCaptionedResponse(const QByteArray &payload,
   const QJsonArray timestamps =
       object.value(QStringLiteral("timestamps")).toArray();
 
-  out.visemes.reserve(timestamps.size());
+  if (timestamps.isEmpty()) {
+    return true;
+  }
+
+  // If the phonemize step succeeded, we have one phoneme word per
+  // spoken word and can build a phoneme-level timeline. If it did
+  // not, or if the counts disagree, fall back to the word-level
+  // heuristic per word so audio is never dropped for a cosmetic
+  // step.
+  const bool havePhonemes = !wordPhonemes.isEmpty();
+
+  QVector<int> starts;
+  QVector<int> ends;
+  QStringList words;
+
+  starts.reserve(timestamps.size());
+  ends.reserve(timestamps.size());
+  words.reserve(timestamps.size());
 
   for (const QJsonValue &value : timestamps) {
     if (!value.isObject()) {
@@ -363,13 +461,33 @@ bool TtsManager::parseCaptionedResponse(const QByteArray &payload,
     const double endSeconds =
         entry.value(QStringLiteral("end_time")).toDouble();
 
-    Viseme viseme;
-    viseme.startMs = static_cast<int>(startSeconds * 1000.0);
-    viseme.endMs = static_cast<int>(endSeconds * 1000.0);
-    viseme.shape = visemeForWord(word);
-
-    out.visemes.append(viseme);
+    words.append(word);
+    starts.append(static_cast<int>(startSeconds * 1000.0));
+    ends.append(static_cast<int>(endSeconds * 1000.0));
   }
+
+  if (!havePhonemes || wordPhonemes.size() != words.size()) {
+    if (havePhonemes && wordPhonemes.size() != words.size()) {
+      qWarning() << "[TTS] Phoneme count" << wordPhonemes.size()
+                 << "does not match word count" << words.size()
+                 << "- falling back to word-level visemes.";
+    }
+
+    out.visemes.reserve(words.size());
+
+    for (int i = 0; i < words.size(); ++i) {
+      Viseme viseme;
+      viseme.startMs = starts.at(i);
+      viseme.endMs = ends.at(i);
+      viseme.shape = visemeForWord(words.at(i));
+
+      out.visemes.append(viseme);
+    }
+
+    return true;
+  }
+
+  out.visemes = VisemeMap::buildTimeline(wordPhonemes, starts, ends);
 
   return true;
 }
@@ -403,12 +521,12 @@ QString TtsManager::visemeForWord(const QString &word) {
   const int total = a + e + i + o + u;
 
   if (total == 0) {
-    return QStringLiteral("M");
+    return QStringLiteral("PP");
   }
 
   const int maxCount = std::max({a, e, i, o, u});
 
-  if (a == maxCount) return QStringLiteral("A");
+  if (a == maxCount) return QStringLiteral("aa");
   if (e == maxCount) return QStringLiteral("E");
   if (i == maxCount) return QStringLiteral("I");
   if (o == maxCount) return QStringLiteral("O");
@@ -559,6 +677,13 @@ void TtsManager::stopAndClear() {
            << "generation=" << m_generation;
 
   m_synthesisInProgress = false;
+
+  if (m_phonemeReply) {
+    QNetworkReply *reply = m_phonemeReply;
+    m_phonemeReply = nullptr;
+    reply->abort();
+    reply->deleteLater();
+  }
 
   if (m_currentReply) {
     QNetworkReply *reply = m_currentReply;

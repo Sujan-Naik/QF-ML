@@ -1188,6 +1188,8 @@ add_library(
         include/embedding/EmbeddingModel.h
         src/embedding/WordPieceTokenizer.cpp
         src/embedding/EmbeddingModel.cpp
+        include/voice/VisemeMap.cpp
+        include/voice/VisemeMap.h
 )
 
 target_include_directories(
