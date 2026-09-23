@@ -11,6 +11,52 @@
 #include <QJsonObject>
 #include <QMediaDevices>
 
+
+namespace {
+
+// Linear-interpolation resampler for mono Int16 PCM. Sufficient for
+// speech. Used to match the TTS output rate to the audio device's
+// preferred sink rate.
+QByteArray resampleLinear(const QByteArray &input, int srcRate,
+                          int dstRate) {
+  if (srcRate <= 0 || dstRate <= 0 || srcRate == dstRate) {
+    return input;
+  }
+
+  const int srcSamples = input.size() / static_cast<int>(sizeof(int16_t));
+
+  if (srcSamples <= 0) {
+    return input;
+  }
+
+  const auto *src = reinterpret_cast<const int16_t *>(input.constData());
+
+  const double ratio = static_cast<double>(dstRate) / srcRate;
+
+  const int dstSamples = qMax(1, static_cast<int>(srcSamples * ratio));
+
+  QByteArray out(dstSamples * static_cast<int>(sizeof(int16_t)),
+                 Qt::Uninitialized);
+
+  auto *dst = reinterpret_cast<int16_t *>(out.data());
+
+  for (int i = 0; i < dstSamples; ++i) {
+    const double pos = i / ratio;
+    const int i0 = static_cast<int>(pos);
+    const int i1 = qMin(i0 + 1, srcSamples - 1);
+    const double frac = pos - i0;
+
+    const double v = src[i0] * (1.0 - frac) + src[i1] * frac;
+
+    dst[i] = static_cast<int16_t>(qBound(-32768.0, v, 32767.0));
+  }
+
+  return out;
+}
+
+} // namespace
+
+
 TtsManager::TtsManager(QObject *parent)
     : QObject(parent), m_audioBuffer(this) {
   m_availableVoices = defaultVoices();
@@ -570,6 +616,17 @@ void TtsManager::playNextInQueue() {
                << actual.sampleRate() << "Hz";
   }
 
+  // Resample the chunk to the sink rate if they differ. Without this,
+  // a 24 kHz chunk played on a 48 kHz sink runs at double speed.
+  if (actual.sampleRate() != chunk.sampleRate) {
+    qDebug() << "[TTS] Resampling from" << chunk.sampleRate
+             << "Hz to" << actual.sampleRate() << "Hz.";
+
+    chunk.data = resampleLinear(chunk.data, chunk.sampleRate,
+                                actual.sampleRate());
+    chunk.sampleRate = actual.sampleRate();
+  }
+
   cleanupAudioSink();
 
   {
@@ -602,7 +659,6 @@ void TtsManager::playNextInQueue() {
 
   emit chunkPlaybackStarted(chunk);
 }
-
 void TtsManager::onAudioStateChanged(QAudio::State state) {
   if (!m_audioSink)
     return;
