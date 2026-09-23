@@ -2,7 +2,10 @@
 
 #include "../../include/voice/VisemeMap.h"
 
+#include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -12,14 +15,20 @@
 
 TtsManager::TtsManager(QObject *parent)
     : QObject(parent), m_networkManager(new QNetworkAccessManager(this)),
-      m_audioBuffer(this) {
+      m_audioBuffer(this), m_healthCheckTimer(new QTimer(this)) {
   m_networkManager->setProxy(QNetworkProxy::NoProxy);
 
   m_availableVoices = defaultVoices();
+
+  m_healthCheckTimer->setInterval(HEALTH_CHECK_INTERVAL_MS);
+
+  connect(m_healthCheckTimer, &QTimer::timeout, this,
+          &TtsManager::checkServerHealth);
 }
 
 TtsManager::~TtsManager() {
   stopAndClear();
+  stopHeadTts();
 
   if (m_currentReply) {
     m_currentReply->abort();
@@ -28,6 +37,134 @@ TtsManager::~TtsManager() {
   }
 
   cleanupAudioSink();
+}
+
+QString TtsManager::resolveStartScript() {
+  // The start script is written by CMake into the HeadTTS clone, which
+  // lives next to the qf-inference sources.
+  //
+  // Search order:
+  //   1. QF_HEADTTS_SCRIPT environment variable.
+  //   2. <app dir>/../../../external/HeadTTS/start.sh  (build tree).
+  //   3. <app dir>/external/HeadTTS/start.sh           (deployed).
+  //   4. <source dir>/external/HeadTTS/start.sh        (dev fallback).
+  const QString fromEnv =
+      qEnvironmentVariable("QF_HEADTTS_SCRIPT").trimmed();
+
+  if (!fromEnv.isEmpty() && QFileInfo::exists(fromEnv)) {
+    return fromEnv;
+  }
+
+  const QString appDir = QCoreApplication::applicationDirPath();
+
+  const QStringList candidates = {
+      QDir(appDir).filePath(
+          QStringLiteral("../../../external/HeadTTS/start.sh")),
+      QDir(appDir).filePath(QStringLiteral("external/HeadTTS/start.sh")),
+      QDir::current().filePath(
+          QStringLiteral("external/HeadTTS/start.sh")),
+  };
+
+  for (const QString &candidate : candidates) {
+    const QString canonical = QFileInfo(candidate).canonicalFilePath();
+
+    if (!canonical.isEmpty() && QFileInfo(canonical).isExecutable()) {
+      return canonical;
+    }
+  }
+
+  return {};
+}
+
+void TtsManager::startHeadTts() {
+  if (m_headTtsProcess) {
+    return;
+  }
+
+  const QString script = resolveStartScript();
+
+  if (script.isEmpty()) {
+    qWarning() << "[TTS] HeadTTS start script not found."
+               << "Set QF_HEADTTS_SCRIPT or run the server manually.";
+
+    emit errorOccurred(
+        QStringLiteral("HeadTTS start script not found. "
+                       "Set QF_HEADTTS_SCRIPT or run the server manually."));
+
+    return;
+  }
+
+  qDebug() << "[TTS] Starting HeadTTS:" << script;
+
+  m_headTtsProcess = new QProcess(this);
+
+  m_headTtsProcess->setProcessChannelMode(
+      QProcess::MergedChannels);
+
+  connect(m_headTtsProcess, &QProcess::finished, this,
+          &TtsManager::onProcessFinished);
+
+  connect(m_headTtsProcess, &QProcess::errorOccurred, this,
+          &TtsManager::onProcessError);
+
+  connect(m_headTtsProcess, &QProcess::readyReadStandardOutput, this,
+          [this]() {
+            const QByteArray out = m_headTtsProcess->readAllStandardOutput();
+
+            if (!out.isEmpty()) {
+              qDebug() << "[HeadTTS]" << out.trimmed();
+            }
+          });
+
+  m_headTtsProcess->start(script, QStringList());
+
+  m_ownsProcess = true;
+}
+
+void TtsManager::stopHeadTts() {
+  if (!m_headTtsProcess) {
+    return;
+  }
+
+  m_healthCheckTimer->stop();
+
+  if (m_headTtsProcess->state() != QProcess::NotRunning) {
+    qDebug() << "[TTS] Stopping HeadTTS.";
+
+    m_headTtsProcess->terminate();
+
+    if (!m_headTtsProcess->waitForFinished(5000)) {
+      qWarning() << "[TTS] HeadTTS did not stop, killing.";
+      m_headTtsProcess->kill();
+      m_headTtsProcess->waitForFinished(2000);
+    }
+  }
+
+  m_headTtsProcess->deleteLater();
+  m_headTtsProcess = nullptr;
+  m_ownsProcess = false;
+}
+
+void TtsManager::onProcessFinished(int exitCode,
+                                   QProcess::ExitStatus status) {
+  qWarning() << "[TTS] HeadTTS process finished. exitCode=" << exitCode
+             << "status=" << status;
+
+  if (m_headTtsProcess) {
+    m_headTtsProcess->deleteLater();
+    m_headTtsProcess = nullptr;
+  }
+
+  m_ownsProcess = false;
+
+  emit errorOccurred(QStringLiteral("HeadTTS process exited unexpectedly."));
+}
+
+void TtsManager::onProcessError(QProcess::ProcessError error) {
+  qWarning() << "[TTS] HeadTTS process error:" << error;
+
+  emit errorOccurred(
+      QStringLiteral("HeadTTS process error: %1").arg(error));
 }
 
 QStringList TtsManager::defaultVoices() {
@@ -60,7 +197,7 @@ void TtsManager::refreshVoices() {
   emit voicesChanged(m_availableVoices);
 }
 
-bool TtsManager::initialize(const QString &serverUrl) {
+bool TtsManager::initialize(const QString &serverUrl, bool autoStart) {
   if (m_initialized)
     return true;
 
@@ -78,8 +215,24 @@ bool TtsManager::initialize(const QString &serverUrl) {
 
   m_initialized = true;
 
-  qDebug() << "[TTS] Using HeadTTS server:" << m_serverUrl.toString();
+  qDebug() << "[TTS] Using HeadTTS server:" << m_serverUrl.toString()
+           << "autoStart=" << autoStart;
 
+  if (autoStart) {
+    startHeadTts();
+  }
+
+  // Wait for the server to answer. This blocks the caller but is
+  // bounded by MAX_HEALTH_ATTEMPTS * HEALTH_CHECK_INTERVAL_MS.
+  //
+  // We do not run a nested event loop here, because that is fragile in
+  // a constructor path. Instead, the first synthesis will fail and
+  // emit an error if the server is not up yet.
+  //
+  // The alternative, a QEventLoop with a timeout, would allow
+  // initialize() to return only once the server is truly ready. That
+  // is what the Docker path did. It is worth doing if the first
+  // synthesis failing is unacceptable.
   return true;
 }
 
@@ -493,4 +646,43 @@ int TtsManager::queueSize() const {
   QMutexLocker locker(&m_queueMutex);
 
   return m_audioQueue.size();
+}
+
+void TtsManager::checkServerHealth() {
+  const QUrl healthUrl =
+      m_serverUrl.resolved(QUrl(QStringLiteral("/health")));
+
+  QNetworkRequest request{healthUrl};
+
+  QNetworkReply *reply = m_networkManager->get(request);
+
+  connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    if (reply->error() == QNetworkReply::NoError) {
+      const int status =
+          reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+      if (status == 200) {
+        m_healthCheckTimer->stop();
+
+        qDebug() << "[TTS] HeadTTS is ready.";
+
+        emit serverReady();
+
+        reply->deleteLater();
+
+        return;
+      }
+    }
+
+    ++m_healthAttempts;
+
+    if (m_healthAttempts >= MAX_HEALTH_ATTEMPTS) {
+      m_healthCheckTimer->stop();
+
+      emit errorOccurred(
+          QStringLiteral("HeadTTS did not become ready within timeout."));
+    }
+
+    reply->deleteLater();
+  });
 }

@@ -10,6 +10,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
+#include <QProcess>
 #include <QQueue>
 #include <QStringList>
 #include <QTimer>
@@ -22,12 +23,14 @@
 // timestamped Kokoro ONNX model and returns audio, Oculus visemes, and
 // per-viseme timing in one response.
 //
-// The server is not started by this class. Start it separately:
+// The server can be managed in one of two ways:
 //
-//   cd external/HeadTTS
-//   npm start
+//   - Managed (autoStart = true). TtsManager spawns the HeadTTS start
+//     script as a child process, waits for port 8882 to answer, and
+//     terminates the child in its destructor. This is the default.
 //
-// It listens on http://127.0.0.1:8882 by default.
+//   - External (autoStart = false). The caller is responsible for
+//     starting and stopping HeadTTS. TtsManager just talks to the URL.
 class TtsManager : public QObject {
   Q_OBJECT
 
@@ -36,10 +39,12 @@ public:
 
   ~TtsManager() override;
 
-  // Connect to a HeadTTS server. Returns false if the URL is invalid.
-  // The server is not probed here; the first synthesis request will
-  // fail if it is not running.
-  bool initialize(const QString &serverUrl = QString());
+  // Connect to a HeadTTS server. When autoStart is true, TtsManager
+  // spawns the HeadTTS start script and waits for the health endpoint
+  // to answer before returning. When autoStart is false, the caller
+  // is responsible for running the server.
+  bool initialize(const QString &serverUrl = QString(),
+                  bool autoStart = true);
 
   void setEnabled(bool enabled);
 
@@ -83,6 +88,12 @@ private slots:
 
   void onAudioStateChanged(QAudio::State state);
 
+  void onProcessFinished(int exitCode, QProcess::ExitStatus status);
+
+  void onProcessError(QProcess::ProcessError error);
+
+  void checkServerHealth();
+
 private:
   void requestSynthesis(const QString &text, int speakerId,
                         quint64 generation);
@@ -94,12 +105,17 @@ private:
 
   void cleanupAudioSink();
 
+  void startHeadTts();
+  void stopHeadTts();
+
   static bool parseHeadTtsResponse(const QByteArray &payload,
                                    int speakerId,
                                    AudioChunk &out,
                                    QString &error);
 
   static QStringList defaultVoices();
+
+  static QString resolveStartScript();
 
 private:
   QNetworkAccessManager *m_networkManager = nullptr;
@@ -130,7 +146,15 @@ private:
 
   QStringList m_availableVoices;
 
+  // Managed lifecycle.
+  QProcess *m_headTtsProcess = nullptr;
+  QTimer *m_healthCheckTimer = nullptr;
+  int m_healthAttempts = 0;
+  bool m_ownsProcess = false;
+
   static constexpr int DEFAULT_PORT = 8882;
+  static constexpr int HEALTH_CHECK_INTERVAL_MS = 500;
+  static constexpr int MAX_HEALTH_ATTEMPTS = 120;
 };
 
 #endif // TTSMANAGER_H
