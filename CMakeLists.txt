@@ -9,11 +9,6 @@ if (POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif ()
 
-# ============================================================================
-# Qt
-# ============================================================================
-
-
 find_package(Qt6 REQUIRED COMPONENTS
         Core
         Gui
@@ -31,12 +26,6 @@ include(FetchContent)
 
 # =============================================================================
 # 0. nvm Node discovery
-# =============================================================================
-#
-# nvm installs Node under ~/.nvm/versions/node/<version>/bin.
-# find_program does not look there by default because CLion launches
-# CMake with a PATH that predates nvm. Glob every installed version so
-# a Node version bump is picked up automatically.
 # =============================================================================
 
 file(
@@ -82,149 +71,25 @@ if (NOT EXISTS
 
 endif ()
 
-set(
-        NEMO_SPEECH_BUILD_ASR
-        ON
-        CACHE BOOL
-        "Build NeMo ASR"
-        FORCE
-)
+set(NEMO_SPEECH_BUILD_ASR ON CACHE BOOL "Build NeMo ASR" FORCE)
+set(NEMO_SPEECH_BUILD_DIAR OFF CACHE BOOL "Build standalone/ASR-integrated diarization" FORCE)
+set(NEMO_SPEECH_BUILD_TTS OFF CACHE BOOL "Build NeMo TTS" FORCE)
+set(NEMO_SPEECH_BUILD_NMT OFF CACHE BOOL "Build NeMo NMT" FORCE)
+set(NEMO_SPEECH_BUILD_CLI OFF CACHE BOOL "Build NeMo CLI" FORCE)
+set(NEMO_SPEECH_BUILD_MIC_CAPTURE OFF CACHE BOOL "Build microphone capture" FORCE)
+set(NEMO_SPEECH_BUILD_HTTP OFF CACHE BOOL "Build HTTP server" FORCE)
+set(NEMO_SPEECH_BUILD_GRPC OFF CACHE BOOL "Build gRPC" FORCE)
+set(NEMO_SPEECH_BUILD_TESTS OFF CACHE BOOL "Build tests" FORCE)
+set(NEMO_SPEECH_BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
+set(NEMO_SPEECH_BUILD_TOOLS OFF CACHE BOOL "Build developer tools" FORCE)
+set(NEMO_SPEECH_WITH_FLASHLIGHT OFF CACHE BOOL "Build Flashlight/KenLM decoder" FORCE)
+set(NEMO_SPEECH_WITH_NORM OFF CACHE BOOL "Build text normalization" FORCE)
+set(NEMO_SPEECH_TTS_WITH_JA OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_TTS_WITH_ZH OFF CACHE BOOL "" FORCE)
 
-set(
-        NEMO_SPEECH_BUILD_DIAR
-        OFF
-        CACHE BOOL
-        "Build standalone/ASR-integrated diarization"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_TTS
-        OFF
-        CACHE BOOL
-        "Build NeMo TTS"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_NMT
-        OFF
-        CACHE BOOL
-        "Build NeMo NMT"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_CLI
-        OFF
-        CACHE BOOL
-        "Build NeMo CLI"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_MIC_CAPTURE
-        OFF
-        CACHE BOOL
-        "Build microphone capture"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_HTTP
-        OFF
-        CACHE BOOL
-        "Build HTTP server"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_GRPC
-        OFF
-        CACHE BOOL
-        "Build gRPC"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_TESTS
-        OFF
-        CACHE BOOL
-        "Build tests"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_EXAMPLES
-        OFF
-        CACHE BOOL
-        "Build examples"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_BUILD_TOOLS
-        OFF
-        CACHE BOOL
-        "Build developer tools"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_WITH_FLASHLIGHT
-        OFF
-        CACHE BOOL
-        "Build Flashlight/KenLM decoder"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_WITH_NORM
-        OFF
-        CACHE BOOL
-        "Build text normalization"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_TTS_WITH_JA
-        OFF
-        CACHE BOOL
-        ""
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_TTS_WITH_ZH
-        OFF
-        CACHE BOOL
-        ""
-        FORCE
-)
-
-set(
-        GGML_VULKAN
-        ON
-        CACHE BOOL
-        "Enable ggml Vulkan backend"
-        FORCE
-)
-
-set(
-        GGML_METAL
-        OFF
-        CACHE BOOL
-        "Enable ggml Metal backend"
-        FORCE
-)
-
-set(
-        NEMO_SPEECH_GGML_PATCHED
-        OFF
-        CACHE BOOL
-        "Use patched NeMo ggml"
-        FORCE
-)
+set(GGML_VULKAN ON CACHE BOOL "Enable ggml Vulkan backend" FORCE)
+set(GGML_METAL OFF CACHE BOOL "Enable ggml Metal backend" FORCE)
+set(NEMO_SPEECH_GGML_PATCHED OFF CACHE BOOL "Use patched NeMo ggml" FORCE)
 
 include_directories(
         BEFORE
@@ -244,15 +109,9 @@ if (EXISTS "${NEMO_VULKAN_CPP}")
             NEMO_VULKAN_CONTENT
     )
 
-    if (
-            NEMO_VULKAN_CONTENT MATCHES
-            "vk::LayerSettingEXT"
-    )
+    if (NEMO_VULKAN_CONTENT MATCHES "vk::LayerSettingEXT")
 
-        message(
-                STATUS
-                "Applying NeMo ggml Vulkan-Headers compatibility patch."
-        )
+        message(STATUS "Applying NeMo ggml Vulkan-Headers compatibility patch.")
 
         string(
                 REPLACE
@@ -282,17 +141,11 @@ if (EXISTS "${NEMO_VULKAN_CPP}")
                 "${NEMO_VULKAN_CONTENT}"
         )
 
-        message(
-                STATUS
-                "NeMo ggml Vulkan-Headers compatibility patch applied."
-        )
+        message(STATUS "NeMo ggml Vulkan-Headers compatibility patch applied.")
 
     else ()
 
-        message(
-                STATUS
-                "NeMo ggml Vulkan-Headers compatibility patch not required."
-        )
+        message(STATUS "NeMo ggml Vulkan-Headers compatibility patch not required.")
 
     endif ()
 
@@ -314,19 +167,13 @@ add_subdirectory(
 
 if (NOT TARGET nemo_speech_asr)
 
-    message(
-            FATAL_ERROR
-            "Expected target 'nemo_speech_asr' was not created."
-    )
+    message(FATAL_ERROR "Expected target 'nemo_speech_asr' was not created.")
 
 endif ()
 
 if (NOT TARGET nemo_speech_asr_c)
 
-    message(
-            FATAL_ERROR
-            "Expected target 'nemo_speech_asr_c' was not created."
-    )
+    message(FATAL_ERROR "Expected target 'nemo_speech_asr_c' was not created.")
 
 endif ()
 
@@ -334,10 +181,7 @@ endif ()
 # 2. ONNX Runtime
 # =============================================================================
 
-set(
-        ONNXRUNTIME_VERSION
-        "1.17.1"
-)
+set(ONNXRUNTIME_VERSION "1.17.1")
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
@@ -373,10 +217,7 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 
 else ()
 
-    message(
-            FATAL_ERROR
-            "Unsupported platform: ${CMAKE_SYSTEM_NAME}"
-    )
+    message(FATAL_ERROR "Unsupported platform: ${CMAKE_SYSTEM_NAME}")
 
 endif ()
 
@@ -423,8 +264,7 @@ elseif (APPLE)
 else ()
 
     set(
-            ONNXRUNTIME_LIBRARY
-            "${onnxruntime_prebuilt_SOURCE_DIR}/lib/libonnxruntime.so"
+            ONNXRUNTIME_LIBRARY            "${onnxruntime_prebuilt_SOURCE_DIR}/lib/libonnxruntime.so"
     )
 
     file(
@@ -435,11 +275,7 @@ else ()
 
 endif ()
 
-add_library(
-        ONNXRuntime::ONNXRuntime
-        UNKNOWN
-        IMPORTED
-)
+add_library(ONNXRuntime::ONNXRuntime UNKNOWN IMPORTED)
 
 set_target_properties(
         ONNXRuntime::ONNXRuntime
@@ -459,94 +295,50 @@ set_target_properties(
 
 if (WIN32)
 
-    set(
-            QF_DATA_ROOT
-            "$ENV{LOCALAPPDATA}/Questfarer/qf-ml"
-    )
+    set(QF_DATA_ROOT "$ENV{LOCALAPPDATA}/Questfarer/qf-ml")
 
 elseif (APPLE)
 
-    set(
-            QF_DATA_ROOT
-            "$ENV{HOME}/Library/Application Support/Questfarer/qf-ml"
-    )
+    set(QF_DATA_ROOT "$ENV{HOME}/Library/Application Support/Questfarer/qf-ml")
 
 else ()
 
-    if (
-            DEFINED ENV{XDG_DATA_HOME}
-            AND NOT "$ENV{XDG_DATA_HOME}" STREQUAL ""
-    )
+    if (DEFINED ENV{XDG_DATA_HOME} AND NOT "$ENV{XDG_DATA_HOME}" STREQUAL "")
 
-        set(
-                QF_DATA_ROOT
-                "$ENV{XDG_DATA_HOME}/Questfarer/qf-ml"
-        )
+        set(QF_DATA_ROOT "$ENV{XDG_DATA_HOME}/Questfarer/qf-ml")
 
     else ()
 
-        set(
-                QF_DATA_ROOT
-                "$ENV{HOME}/.local/share/Questfarer/qf-ml"
-        )
+        set(QF_DATA_ROOT "$ENV{HOME}/.local/share/Questfarer/qf-ml")
 
     endif ()
 
 endif ()
 
-set(
-        MODELS_DIR
-        "${QF_DATA_ROOT}/models"
-)
+set(MODELS_DIR "${QF_DATA_ROOT}/models")
 
-file(
-        MAKE_DIRECTORY
-        "${MODELS_DIR}"
-)
+file(MAKE_DIRECTORY "${MODELS_DIR}")
 
-message(
-        STATUS
-        "QF shared data root: ${QF_DATA_ROOT}"
-)
+message(STATUS "QF shared data root: ${QF_DATA_ROOT}")
 
 # =============================================================================
 # 3A. Hugging Face CLI
 # =============================================================================
 
-find_program(
-        HF_CLI
-        NAMES
-        hf
-)
+find_program(HF_CLI NAMES hf)
 
 if (HF_CLI)
 
-    message(
-            STATUS
-            "Hugging Face CLI found: ${HF_CLI}"
-    )
+    message(STATUS "Hugging Face CLI found: ${HF_CLI}")
 
-    set(
-            HF_AVAILABLE
-            TRUE
-    )
+    set(HF_AVAILABLE TRUE)
 
 else ()
 
-    message(
-            STATUS
-            "Hugging Face CLI not found."
-    )
+    message(STATUS "Hugging Face CLI not found.")
+    message(STATUS "Using CMake HTTP fallback.")
 
-    message(
-            STATUS
-            "Using CMake HTTP fallback."
-    )
-
-    set(
-            HF_AVAILABLE
-            FALSE
-    )
+    set(HF_AVAILABLE FALSE)
 
 endif ()
 
@@ -554,87 +346,39 @@ endif ()
 # 3B. Generic downloader
 # =============================================================================
 
-function(
-        download_model
-        url
-        dest
-        description
-)
+function(download_model url dest description)
 
     if (EXISTS "${dest}")
 
-        message(
-                STATUS
-                "${description} already exists."
-        )
-
+        message(STATUS "${description} already exists.")
         return()
 
     endif ()
 
-    get_filename_component(
-            destination_dir
-            "${dest}"
-            DIRECTORY
-    )
+    get_filename_component(destination_dir "${dest}" DIRECTORY)
 
-    file(
-            MAKE_DIRECTORY
-            "${destination_dir}"
-    )
+    file(MAKE_DIRECTORY "${destination_dir}")
 
-    message(
-            STATUS
-            ""
-    )
-
-    message(
-            STATUS
-            "Downloading ${description}..."
-    )
-
-    message(
-            STATUS
-            "URL: ${url}"
-    )
+    message(STATUS "")
+    message(STATUS "Downloading ${description}...")
+    message(STATUS "URL: ${url}")
 
     file(
             DOWNLOAD
             "${url}"
             "${dest}"
-
             SHOW_PROGRESS
-
-            STATUS
-            download_status
-
-            TIMEOUT
-            1800
-
-            INACTIVITY_TIMEOUT
-            120
+            STATUS download_status
+            TIMEOUT 1800
+            INACTIVITY_TIMEOUT 120
     )
 
-    list(
-            GET
-            download_status
-            0
-            status_code
-    )
-
-    list(
-            GET
-            download_status
-            1
-            error_message
-    )
+    list(GET download_status 0 status_code)
+    list(GET download_status 1 error_message)
 
     if (NOT status_code EQUAL 0)
 
-        file(
-                REMOVE
-                "${dest}"
-        )
+        file(REMOVE "${dest}")
 
         message(
                 FATAL_ERROR
@@ -647,17 +391,11 @@ function(
 
     if (NOT EXISTS "${dest}")
 
-        message(
-                FATAL_ERROR
-                "${description} was not created at ${dest}."
-        )
+        message(FATAL_ERROR "${description} was not created at ${dest}.")
 
     endif ()
 
-    message(
-            STATUS
-            "Downloaded ${description}"
-    )
+    message(STATUS "Downloaded ${description}")
 
 endfunction()
 
@@ -665,52 +403,30 @@ endfunction()
 # 3C. Hugging Face downloader
 # =============================================================================
 
-function(
-        download_hf_model
-        repo_id
-        filename
-        destination
-        description
-)
+function(download_hf_model repo_id filename destination description)
 
-    get_filename_component(
-            destination_dir
-            "${destination}"
-            DIRECTORY
-    )
+    get_filename_component(destination_dir "${destination}" DIRECTORY)
 
-    file(
-            MAKE_DIRECTORY
-            "${destination_dir}"
-    )
+    file(MAKE_DIRECTORY "${destination_dir}")
 
     if (EXISTS "${destination}")
 
-        message(
-                STATUS
-                "${description} already exists."
-        )
-
+        message(STATUS "${description} already exists.")
         return()
 
     endif ()
 
     if (HF_AVAILABLE)
 
-        message(
-                STATUS
-                "Downloading ${description} using Hugging Face..."
-        )
+        message(STATUS "Downloading ${description} using Hugging Face...")
 
         execute_process(
                 COMMAND
                 ${CMAKE_COMMAND}
                 -E
                 env
-
                 HF_XET_HIGH_PERFORMANCE=1
                 HF_HUB_DOWNLOAD_TIMEOUT=1800
-
                 ${HF_CLI}
                 download
                 "${repo_id}"
@@ -720,37 +436,17 @@ function(
                 --max-workers
                 "8"
 
-                RESULT_VARIABLE
-                hf_result
-
-                OUTPUT_VARIABLE
-                hf_output
-
-                ERROR_VARIABLE
-                hf_error
+                RESULT_VARIABLE hf_result
+                OUTPUT_VARIABLE hf_output
+                ERROR_VARIABLE hf_error
         )
 
         if (NOT hf_result EQUAL 0)
 
-            message(
-                    WARNING
-                    "Hugging Face download failed for ${description}."
-            )
-
-            message(
-                    WARNING
-                    "stdout:\n${hf_output}"
-            )
-
-            message(
-                    WARNING
-                    "stderr:\n${hf_error}"
-            )
-
-            message(
-                    STATUS
-                    "Falling back to CMake HTTP download..."
-            )
+            message(WARNING "Hugging Face download failed for ${description}.")
+            message(WARNING "stdout:\n${hf_output}")
+            message(WARNING "stderr:\n${hf_error}")
+            message(STATUS "Falling back to CMake HTTP download...")
 
             download_model(
                     "https://huggingface.co/${repo_id}/resolve/main/${filename}"
@@ -780,10 +476,7 @@ function(
 
     endif ()
 
-    message(
-            STATUS
-            "${description}: downloaded"
-    )
+    message(STATUS "${description}: downloaded")
 
 endfunction()
 
@@ -799,63 +492,30 @@ set(
 )
 
 set_property(
-        CACHE
-        QF_STT_MODEL
-        PROPERTY
-        STRINGS
-        nemotron-3.5
-        nemotron-en
-        parakeet-ctc
-        parakeet-tdt
+        CACHE QF_STT_MODEL
+        PROPERTY STRINGS
+        nemotron-3.5 nemotron-en parakeet-ctc parakeet-tdt
 )
 
 if (QF_STT_MODEL STREQUAL "nemotron-3.5")
 
-    set(
-            QF_STT_REPO
-            "nvidia/nemotron-3.5-asr-streaming-0.6b"
-    )
-
-    set(
-            QF_STT_FILENAME
-            "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
-    )
+    set(QF_STT_REPO "nvidia/nemotron-3.5-asr-streaming-0.6b")
+    set(QF_STT_FILENAME "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf")
 
 elseif (QF_STT_MODEL STREQUAL "nemotron-en")
 
-    set(
-            QF_STT_REPO
-            "nvidia/nemotron-speech-streaming-en-0.6b"
-    )
-
-    set(
-            QF_STT_FILENAME
-            "nemotron-speech-streaming-en-0.6b.q8_0.gguf"
-    )
+    set(QF_STT_REPO "nvidia/nemotron-speech-streaming-en-0.6b")
+    set(QF_STT_FILENAME "nemotron-speech-streaming-en-0.6b.q8_0.gguf")
 
 elseif (QF_STT_MODEL STREQUAL "parakeet-ctc")
 
-    set(
-            QF_STT_REPO
-            "nvidia/parakeet-ctc-1.1b"
-    )
-
-    set(
-            QF_STT_FILENAME
-            "parakeet-ctc-1.1b.q8_0.gguf"
-    )
+    set(QF_STT_REPO "nvidia/parakeet-ctc-1.1b")
+    set(QF_STT_FILENAME "parakeet-ctc-1.1b.q8_0.gguf")
 
 elseif (QF_STT_MODEL STREQUAL "parakeet-tdt")
 
-    set(
-            QF_STT_REPO
-            "nvidia/parakeet-tdt-0.6b-v3"
-    )
-
-    set(
-            QF_STT_FILENAME
-            "parakeet-tdt-0.6b-v3.q8_0.gguf"
-    )
+    set(QF_STT_REPO "nvidia/parakeet-tdt-0.6b-v3")
+    set(QF_STT_FILENAME "parakeet-tdt-0.6b-v3.q8_0.gguf")
 
 else ()
 
@@ -871,10 +531,7 @@ else ()
 
 endif ()
 
-set(
-        QF_STT_MODEL_PATH
-        "${MODELS_DIR}/stt/${QF_STT_FILENAME}"
-)
+set(QF_STT_MODEL_PATH "${MODELS_DIR}/stt/${QF_STT_FILENAME}")
 
 download_hf_model(
         "${QF_STT_REPO}"
@@ -883,15 +540,8 @@ download_hf_model(
         "ASR model ${QF_STT_MODEL}"
 )
 
-message(
-        STATUS
-        "Selected ASR model: ${QF_STT_MODEL}"
-)
-
-message(
-        STATUS
-        "ASR model path: ${QF_STT_MODEL_PATH}"
-)
+message(STATUS "Selected ASR model: ${QF_STT_MODEL}")
+message(STATUS "ASR model path: ${QF_STT_MODEL_PATH}")
 
 # =============================================================================
 # 3E. openWakeWord models
@@ -911,42 +561,15 @@ set(
         "hey_jarvis.onnx"
 )
 
-list(
-        LENGTH
-        OWW_FILES
-        NUM_OWW_MODELS
-)
+list(LENGTH OWW_FILES NUM_OWW_MODELS)
+math(EXPR MAX_OWW_INDEX "${NUM_OWW_MODELS} - 1")
 
-math(
-        EXPR
-        MAX_OWW_INDEX
-        "${NUM_OWW_MODELS} - 1"
-)
+foreach (INDEX RANGE ${MAX_OWW_INDEX})
 
-foreach (
-        INDEX
-        RANGE
-        ${MAX_OWW_INDEX}
-)
+    list(GET OWW_FILES ${INDEX} MODEL_FILE)
+    list(GET OWW_URLS ${INDEX} FILE_URL)
 
-    list(
-            GET
-            OWW_FILES
-            ${INDEX}
-            MODEL_FILE
-    )
-
-    list(
-            GET
-            OWW_URLS
-            ${INDEX}
-            FILE_URL
-    )
-
-    set(
-            DEST_PATH
-            "${MODELS_DIR}/wakeword/${MODEL_FILE}"
-    )
+    set(DEST_PATH "${MODELS_DIR}/wakeword/${MODEL_FILE}")
 
     download_model(
             "${FILE_URL}"
@@ -957,18 +580,12 @@ foreach (
 endforeach ()
 
 # =============================================================================
-# 3F. Embedding model (all-MiniLM-L6-v2, INT8 quantized)
+# 3F. Embedding model
 # =============================================================================
 
-set(
-        QF_EMBEDDING_DIR
-        "${MODELS_DIR}/embedding"
-)
+set(QF_EMBEDDING_DIR "${MODELS_DIR}/embedding")
 
-file(
-        MAKE_DIRECTORY
-        "${QF_EMBEDDING_DIR}"
-)
+file(MAKE_DIRECTORY "${QF_EMBEDDING_DIR}")
 
 download_hf_model(
         "Xenova/all-MiniLM-L6-v2"
@@ -984,39 +601,34 @@ download_hf_model(
         "Embedding model vocab"
 )
 
-message(
-        STATUS
-        "Embedding model directory: ${QF_EMBEDDING_DIR}"
-)
+message(STATUS "Embedding model directory: ${QF_EMBEDDING_DIR}")
 
 # =============================================================================
-# 3G. HeadTTS (Kokoro with native visemes and timestamps)
+# 3G. HeadTTS
 # =============================================================================
 #
 # HeadTTS is a Node.js server that runs the timestamped Kokoro ONNX
 # model and returns native Oculus 15 visemes with per-phoneme timing.
 #
-# This block does five things:
+# Install:
+#   1. Clone met4citizen/HeadTTS if not already present.
+#   2. Run npm install.
+#   3. Install ws, which headtts-node.mjs imports but package.json
+#      does not declare.
+#   4. Write a config file tuned for QF-ML.
 #
-#   1. Clones met4citizen/HeadTTS if not already present.
-#   2. Runs npm install and installs the "ws" package, which
-#      headtts-node.mjs imports but package.json does not declare.
-#   3. Writes a config file tuned for QF-ML.
-#   4. Writes a start.sh wrapper.
-#   5. Registers a CMake target "headtts-run" so the server can be
-#      launched from the CLion run configuration dropdown.
+# Runtime:
+#   TtsManager launches node directly by absolute path, with the
+#   HeadTTS entry module as its argument and the HeadTTS directory as
+#   the working directory. No shell, no npm, no PATH dependency.
 #
-# The absolute path of start.sh is baked into the qf-inference target
-# as QF_HEADTTS_SCRIPT_DEFAULT, so TtsManager can spawn the server
-# without guessing where the tree lives.
+#   The absolute paths of the node binary and the HeadTTS directory
+#   are baked into qf-inference as compile-time defines, so the built
+#   library knows where its own HeadTTS is without guessing from the
+#   executable's location.
 #
-# Idempotency is guarded by three sentinels:
-#
-#   external/HeadTTS/.git                          -> clone succeeded
-#   external/HeadTTS/node_modules/.package-lock.json -> npm install succeeded
-#   external/HeadTTS/node_modules/ws               -> ws install succeeded
-#
-# A failed step on any prior configure will be retried on the next.
+#   If the compile-time paths are wrong, the environment variables
+#   QF_NODE_CLI and QF_HEADTTS_DIR override them at runtime.
 # =============================================================================
 
 set(
@@ -1030,8 +642,8 @@ set(
 )
 
 set(
-        HEADTTS_START_SCRIPT
-        "${HEADTTS_DIR}/start.sh"
+        HEADTTS_ENTRY
+        "${HEADTTS_DIR}/modules/headtts-node.mjs"
 )
 
 set(
@@ -1063,73 +675,45 @@ find_program(
 
 if (NODE_CLI AND NPM_CLI)
 
-    message(
-            STATUS
-            "Node.js found: ${NODE_CLI}"
-    )
+    message(STATUS "Node.js found: ${NODE_CLI}")
 
     # -------------------------------------------------------------------------
-    # 1. Clone
+    # Clone
     # -------------------------------------------------------------------------
 
     if (NOT EXISTS "${HEADTTS_CLONE_SENTINEL}")
 
-        message(
-                STATUS
-                "Cloning HeadTTS into ${HEADTTS_DIR}..."
-        )
+        message(STATUS "Cloning HeadTTS into ${HEADTTS_DIR}...")
 
         execute_process(
                 COMMAND
-                git
-                clone
-                --depth
-                1
+                git clone --depth 1
                 https://github.com/met4citizen/HeadTTS
                 "${HEADTTS_DIR}"
 
-                RESULT_VARIABLE
-                clone_result
-
-                OUTPUT_VARIABLE
-                clone_output
-
-                ERROR_VARIABLE
-                clone_error
+                RESULT_VARIABLE clone_result
+                OUTPUT_VARIABLE clone_output
+                ERROR_VARIABLE clone_error
         )
 
         if (NOT clone_result EQUAL 0)
 
-            message(
-                    WARNING
-                    "Failed to clone HeadTTS."
-            )
-
-            message(
-                    WARNING
-                    "stdout:\n${clone_output}"
-            )
-
-            message(
-                    WARNING
-                    "stderr:\n${clone_error}"
-            )
+            message(WARNING "Failed to clone HeadTTS.")
+            message(WARNING "stdout:\n${clone_output}")
+            message(WARNING "stderr:\n${clone_error}")
 
         endif ()
 
     endif ()
 
     # -------------------------------------------------------------------------
-    # 2. npm install
+    # npm install
     # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_DIR}/package.json"
             AND NOT EXISTS "${HEADTTS_NPM_SENTINEL}")
 
-        message(
-                STATUS
-                "Running npm install for HeadTTS..."
-        )
+        message(STATUS "Running npm install for HeadTTS...")
 
         execute_process(
                 COMMAND
@@ -1139,48 +723,29 @@ if (NODE_CLI AND NPM_CLI)
                 WORKING_DIRECTORY
                 "${HEADTTS_DIR}"
 
-                RESULT_VARIABLE
-                npm_result
-
-                OUTPUT_VARIABLE
-                npm_output
-
-                ERROR_VARIABLE
-                npm_error
+                RESULT_VARIABLE npm_result
+                OUTPUT_VARIABLE npm_output
+                ERROR_VARIABLE npm_error
         )
 
         if (NOT npm_result EQUAL 0)
 
-            message(
-                    WARNING
-                    "npm install failed for HeadTTS."
-            )
-
-            message(
-                    WARNING
-                    "stdout:\n${npm_output}"
-            )
-
-            message(
-                    WARNING
-                    "stderr:\n${npm_error}"
-            )
+            message(WARNING "npm install failed for HeadTTS.")
+            message(WARNING "stdout:\n${npm_output}")
+            message(WARNING "stderr:\n${npm_error}")
 
         endif ()
 
     endif ()
 
     # -------------------------------------------------------------------------
-    # 3. ws package
+    # ws package
     # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_NPM_SENTINEL}"
             AND NOT EXISTS "${HEADTTS_WS_SENTINEL}")
 
-        message(
-                STATUS
-                "Installing missing ws dependency for HeadTTS..."
-        )
+        message(STATUS "Installing missing ws dependency for HeadTTS...")
 
         execute_process(
                 COMMAND
@@ -1191,39 +756,23 @@ if (NODE_CLI AND NPM_CLI)
                 WORKING_DIRECTORY
                 "${HEADTTS_DIR}"
 
-                RESULT_VARIABLE
-                ws_result
-
-                OUTPUT_VARIABLE
-                ws_output
-
-                ERROR_VARIABLE
-                ws_error
+                RESULT_VARIABLE ws_result
+                OUTPUT_VARIABLE ws_output
+                ERROR_VARIABLE ws_error
         )
 
         if (NOT ws_result EQUAL 0)
 
-            message(
-                    WARNING
-                    "Failed to install ws for HeadTTS."
-            )
-
-            message(
-                    WARNING
-                    "stdout:\n${ws_output}"
-            )
-
-            message(
-                    WARNING
-                    "stderr:\n${ws_error}"
-            )
+            message(WARNING "Failed to install ws for HeadTTS.")
+            message(WARNING "stdout:\n${ws_output}")
+            message(WARNING "stderr:\n${ws_error}")
 
         endif ()
 
     endif ()
 
     # -------------------------------------------------------------------------
-    # 4. Config
+    # Config
     # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_NPM_SENTINEL}"
@@ -1256,123 +805,31 @@ if (NODE_CLI AND NPM_CLI)
                 "}\n"
         )
 
-        message(
-                STATUS
-                "Wrote HeadTTS config: ${HEADTTS_CONFIG}"
-        )
+        message(STATUS "Wrote HeadTTS config: ${HEADTTS_CONFIG}")
 
     endif ()
 
     # -------------------------------------------------------------------------
-    # 5. start.sh
+    # Status
     # -------------------------------------------------------------------------
 
-    if (EXISTS "${HEADTTS_NPM_SENTINEL}"
-            AND NOT EXISTS "${HEADTTS_START_SCRIPT}")
+    if (EXISTS "${HEADTTS_ENTRY}")
 
-        file(
-                WRITE
-                "${HEADTTS_START_SCRIPT}"
-                "#!/usr/bin/env bash\n"
-                "# Generated by CMake. Runs the HeadTTS server.\n"
-                "set -euo pipefail\n"
-                "\n"
-                "cd \"$(dirname \"$0\")\"\n"
-                "\n"
-                "if [ ! -d node_modules ]; then\n"
-                "  echo \"HeadTTS: node_modules missing, running npm install\" >&2\n"
-                "  npm install\n"
-                "fi\n"
-                "\n"
-                "exec npm start\n"
-        )
-
-        file(
-                CHMOD
-                "${HEADTTS_START_SCRIPT}"
-                PERMISSIONS
-                OWNER_READ
-                OWNER_WRITE
-                OWNER_EXECUTE
-                GROUP_READ
-                GROUP_EXECUTE
-                WORLD_READ
-                WORLD_EXECUTE
-        )
-
-        message(
-                STATUS
-                "Wrote HeadTTS start script: ${HEADTTS_START_SCRIPT}"
-        )
-
-    endif ()
-
-    # -------------------------------------------------------------------------
-    # 6. headtts-run target
-    # -------------------------------------------------------------------------
-
-    if (EXISTS "${HEADTTS_START_SCRIPT}")
-
-        add_custom_target(
-                headtts-run
-
-                COMMAND
-                "${HEADTTS_START_SCRIPT}"
-
-                WORKING_DIRECTORY
-                "${HEADTTS_DIR}"
-
-                USES_TERMINAL
-
-                COMMENT
-                "Starting HeadTTS server on http://127.0.0.1:8882"
-
-                VERBATIM
-        )
-
-        message(
-                STATUS
-                ""
-        )
-
-        message(
-                STATUS
-                "HeadTTS is installed."
-        )
-
-        message(
-                STATUS
-                "Start script: ${HEADTTS_START_SCRIPT}"
-        )
-
-        message(
-                STATUS
-                "It listens on http://127.0.0.1:8882"
-        )
-
-        message(
-                STATUS
-                "First start downloads the timestamped Kokoro model (~90 MB)."
-        )
-
-        message(
-                STATUS
-                ""
-        )
+        message(STATUS "")
+        message(STATUS "HeadTTS is installed.")
+        message(STATUS "  node:  ${NODE_CLI}")
+        message(STATUS "  entry: ${HEADTTS_ENTRY}")
+        message(STATUS "  cwd:   ${HEADTTS_DIR}")
+        message(STATUS "  url:   http://127.0.0.1:8882")
+        message(STATUS "First start downloads the timestamped Kokoro model (~90 MB).")
+        message(STATUS "")
 
     endif ()
 
 else ()
 
-    message(
-            STATUS
-            "Node.js or npm not found. HeadTTS will not be installed."
-    )
-
-    message(
-            STATUS
-            "Install Node.js v20 or later, then re-run CMake."
-    )
+    message(STATUS "Node.js or npm not found. HeadTTS will not be installed.")
+    message(STATUS "Install Node.js v20 or later, then re-run CMake.")
 
 endif ()
 
@@ -1380,55 +837,26 @@ endif ()
 # 4. OCR Libraries
 # =============================================================================
 
-find_package(
-        PkgConfig
-        QUIET
-)
+find_package(PkgConfig QUIET)
 
 if (PkgConfig_FOUND)
 
-    pkg_check_modules(
-            TESSERACT
-            tesseract
-    )
-
-    pkg_check_modules(
-            LEPTONICA
-            lept
-    )
+    pkg_check_modules(TESSERACT tesseract)
+    pkg_check_modules(LEPTONICA lept)
 
 endif ()
 
 if (NOT TESSERACT_FOUND)
 
-    find_library(
-            TESSERACT_LIBRARIES
-            NAMES
-            tesseract
-    )
-
-    find_path(
-            TESSERACT_INCLUDE_DIRS
-            NAMES
-            tesseract/baseapi.h
-    )
+    find_library(TESSERACT_LIBRARIES NAMES tesseract)
+    find_path(TESSERACT_INCLUDE_DIRS NAMES tesseract/baseapi.h)
 
 endif ()
 
 if (NOT LEPTONICA_FOUND)
 
-    find_library(
-            LEPTONICA_LIBRARIES
-            NAMES
-            lept
-            leptonica
-    )
-
-    find_path(
-            LEPTONICA_INCLUDE_DIRS
-            NAMES
-            leptonica/allheaders.h
-    )
+    find_library(LEPTONICA_LIBRARIES NAMES lept leptonica)
+    find_path(LEPTONICA_INCLUDE_DIRS NAMES leptonica/allheaders.h)
 
 endif ()
 
@@ -1493,48 +921,39 @@ target_include_directories(
         ${LEPTONICA_INCLUDE_DIRS}
 
         "${NEMO_SPEECH_SOURCE_DIR}/include"
-
 )
 
 # -----------------------------------------------------------------------------
-# HeadTTS start script location.
+# HeadTTS launch paths.
 #
-# The absolute path of the start script is baked into the library at
-# compile time. TtsManager reads it as a fallback after the
-# QF_HEADTTS_SCRIPT environment variable. This is what makes the
-# server location autodetect at runtime: the build system records the
-# location when it is genuinely known, rather than the runtime
-# guessing from the binary's directory.
+# The absolute paths of the node binary and the HeadTTS directory are
+# baked into the library at compile time. TtsManager reads them as the
+# fallback after the QF_NODE_CLI and QF_HEADTTS_DIR environment
+# variables. This is what makes the launch robust: the build system
+# records the paths when they are genuinely known, rather than the
+# runtime guessing from the binary's location or relying on PATH.
 #
-# Guarded by an EXISTS check so a tree without HeadTTS still builds.
+# Guarded by EXISTS checks so a tree without HeadTTS still builds.
 # -----------------------------------------------------------------------------
 
-if (EXISTS "${HEADTTS_START_SCRIPT}")
+if (EXISTS "${HEADTTS_ENTRY}" AND NODE_CLI)
 
     target_compile_definitions(
             qf-inference
 
             PRIVATE
 
-            QF_HEADTTS_SCRIPT_DEFAULT="${HEADTTS_START_SCRIPT}"
+            QF_NODE_CLI_DEFAULT="${NODE_CLI}"
+            QF_HEADTTS_DIR_DEFAULT="${HEADTTS_DIR}"
     )
 
-    message(
-            STATUS
-            "HeadTTS start script baked into qf-inference:"
-    )
-
-    message(
-            STATUS
-            "  ${HEADTTS_START_SCRIPT}"
-    )
+    message(STATUS "HeadTTS launch paths baked into qf-inference:")
+    message(STATUS "  QF_NODE_CLI_DEFAULT=${NODE_CLI}")
+    message(STATUS "  QF_HEADTTS_DIR_DEFAULT=${HEADTTS_DIR}")
 
 else ()
 
-    message(
-            STATUS
-            "HeadTTS not present; QF_HEADTTS_SCRIPT_DEFAULT not set."
-    )
+    message(STATUS "HeadTTS launch paths not set; runtime must supply them.")
 
 endif ()
 
@@ -1576,7 +995,6 @@ qt_add_executable(
 
         include/app/RuntimeManager.h
         src/app/RuntimeManager.cpp
-
 )
 
 target_link_libraries(
@@ -1623,9 +1041,7 @@ if (WIN32)
                 POST_BUILD
 
                 COMMAND
-                ${CMAKE_COMMAND}
-                -E
-                copy_if_different
+                ${CMAKE_COMMAND} -E copy_if_different
                 "${ONNXRUNTIME_DLL}"
                 "$<TARGET_FILE_DIR:qf-ml-demo>/onnxruntime.dll"
         )
@@ -1634,19 +1050,14 @@ if (WIN32)
 
 elseif (APPLE)
 
-    foreach (
-            dylib
-            ${ONNXRUNTIME_DYLIBS}
-    )
+    foreach (dylib ${ONNXRUNTIME_DYLIBS})
 
         add_custom_command(
                 TARGET qf-ml-demo
                 POST_BUILD
 
                 COMMAND
-                ${CMAKE_COMMAND}
-                -E
-                copy_if_different
+                ${CMAKE_COMMAND} -E copy_if_different
                 "${dylib}"
                 "$<TARGET_FILE_DIR:qf-ml-demo>/"
         )
@@ -1655,19 +1066,14 @@ elseif (APPLE)
 
 else ()
 
-    foreach (
-            solib
-            ${ONNXRUNTIME_SOLIBS}
-    )
+    foreach (solib ${ONNXRUNTIME_SOLIBS})
 
         add_custom_command(
                 TARGET qf-ml-demo
                 POST_BUILD
 
                 COMMAND
-                ${CMAKE_COMMAND}
-                -E
-                copy_if_different
+                ${CMAKE_COMMAND} -E copy_if_different
                 "${solib}"
                 "$<TARGET_FILE_DIR:qf-ml-demo>/"
         )
@@ -1683,9 +1089,7 @@ if (TARGET nemo_speech_asr_c)
             POST_BUILD
 
             COMMAND
-            ${CMAKE_COMMAND}
-            -E
-            copy_if_different
+            ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:nemo_speech_asr_c>"
             "$<TARGET_FILE_DIR:qf-ml-demo>"
     )
@@ -1699,9 +1103,7 @@ if (TARGET nemo_speech_asr)
             POST_BUILD
 
             COMMAND
-            ${CMAKE_COMMAND}
-            -E
-            copy_if_different
+            ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:nemo_speech_asr>"
             "$<TARGET_FILE_DIR:qf-ml-demo>"
     )
@@ -1715,45 +1117,28 @@ if (TARGET ggml-vulkan)
             POST_BUILD
 
             COMMAND
-            ${CMAKE_COMMAND}
-            -E
-            copy_if_different
+            ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:ggml-vulkan>"
             "$<TARGET_FILE_DIR:qf-ml-demo>"
     )
 
 endif ()
 
-foreach (
-        NEMO_TARGET
-        ggml
-        ggml-base
-        ggml-cpu
-        ggml-vulkan
-)
+foreach (NEMO_TARGET ggml ggml-base ggml-cpu ggml-vulkan)
 
     if (TARGET ${NEMO_TARGET})
 
-        get_target_property(
-                NEMO_TARGET_TYPE
-                ${NEMO_TARGET}
-                TYPE
-        )
+        get_target_property(NEMO_TARGET_TYPE ${NEMO_TARGET} TYPE)
 
-        if (
-                NEMO_TARGET_TYPE STREQUAL "SHARED_LIBRARY"
-                OR
-                NEMO_TARGET_TYPE STREQUAL "MODULE_LIBRARY"
-        )
+        if (NEMO_TARGET_TYPE STREQUAL "SHARED_LIBRARY"
+                OR NEMO_TARGET_TYPE STREQUAL "MODULE_LIBRARY")
 
             add_custom_command(
                     TARGET qf-ml-demo
                     POST_BUILD
 
                     COMMAND
-                    ${CMAKE_COMMAND}
-                    -E
-                    copy_if_different
+                    ${CMAKE_COMMAND} -E copy_if_different
                     "$<TARGET_FILE:${NEMO_TARGET}>"
                     "$<TARGET_FILE_DIR:qf-ml-demo>"
             )
@@ -1802,88 +1187,29 @@ endif ()
 # 9. Configuration summary
 # =============================================================================
 
-message(
-        STATUS
-        ""
-)
+message(STATUS "")
+message(STATUS "============================================================")
+message(STATUS "QF-ML configuration")
+message(STATUS "============================================================")
+message(STATUS "CMake:       ${CMAKE_VERSION}")
+message(STATUS "Build type:  ${CMAKE_BUILD_TYPE}")
+message(STATUS "ASR runtime: NeMo-Speech.cpp")
+message(STATUS "ASR model:   ${QF_STT_MODEL}")
+message(STATUS "ASR file:    ${QF_STT_MODEL_PATH}")
+message(STATUS "Vulkan:      ${GGML_VULKAN}")
+message(STATUS "Demo target: qf-ml-demo")
 
-message(
-        STATUS
-        "============================================================"
-)
+if (NODE_CLI AND NPM_CLI AND EXISTS "${HEADTTS_ENTRY}")
 
-message(
-        STATUS
-        "QF-ML configuration"
-)
-
-message(
-        STATUS
-        "============================================================"
-)
-
-message(
-        STATUS
-        "CMake:       ${CMAKE_VERSION}"
-)
-
-message(
-        STATUS
-        "Build type:  ${CMAKE_BUILD_TYPE}"
-)
-
-message(
-        STATUS
-        "ASR runtime: NeMo-Speech.cpp"
-)
-
-message(
-        STATUS
-        "ASR model:   ${QF_STT_MODEL}"
-)
-
-message(
-        STATUS
-        "ASR file:    ${QF_STT_MODEL_PATH}"
-)
-
-message(
-        STATUS
-        "Vulkan:      ${GGML_VULKAN}"
-)
-
-message(
-        STATUS
-        "Demo target: qf-ml-demo"
-)
-
-if (NODE_CLI AND NPM_CLI AND EXISTS "${HEADTTS_DIR}/package.json")
-
-    message(
-            STATUS
-            "HeadTTS:     ${HEADTTS_DIR}"
-    )
-
-    message(
-            STATUS
-            "HeadTTS URL: http://127.0.0.1:8882"
-    )
+    message(STATUS "HeadTTS:     ${HEADTTS_DIR}")
+    message(STATUS "HeadTTS URL: http://127.0.0.1:8882")
+    message(STATUS "Node binary: ${NODE_CLI}")
 
 else ()
 
-    message(
-            STATUS
-            "HeadTTS:     not installed"
-    )
+    message(STATUS "HeadTTS:     not installed")
 
 endif ()
 
-message(
-        STATUS
-        "============================================================"
-)
-
-message(
-        STATUS
-        ""
-)
+message(STATUS "============================================================")
+message(STATUS "")

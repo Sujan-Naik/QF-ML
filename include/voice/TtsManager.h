@@ -23,14 +23,15 @@
 // timestamped Kokoro ONNX model and returns audio, Oculus visemes, and
 // per-viseme timing in one response.
 //
-// The server can be managed in one of two ways:
+// The server is launched by absolute path: node is invoked with the
+// HeadTTS entry module as its argument, with the HeadTTS directory as
+// the working directory. npm is not involved, start.sh is not
+// involved, and nothing in the launch path depends on the parent
+// process's PATH. Both the node binary and the HeadTTS directory are
+// baked into qf-inference by CMake at configure time.
 //
-//   - Managed (autoStart = true). TtsManager spawns the HeadTTS start
-//     script as a child process, waits for port 8882 to answer, and
-//     terminates the child in its destructor. This is the default.
-//
-//   - External (autoStart = false). The caller is responsible for
-//     starting and stopping HeadTTS. TtsManager just talks to the URL.
+// If the compile-time paths are wrong or missing, the environment
+// variables QF_NODE_CLI and QF_HEADTTS_DIR can override them.
 class TtsManager : public QObject {
   Q_OBJECT
 
@@ -39,10 +40,6 @@ public:
 
   ~TtsManager() override;
 
-  // Connect to a HeadTTS server. When autoStart is true, TtsManager
-  // spawns the HeadTTS start script and waits for the health endpoint
-  // to answer before returning. When autoStart is false, the caller
-  // is responsible for running the server.
   bool initialize(const QString &serverUrl = QString(),
                   bool autoStart = true);
 
@@ -115,7 +112,9 @@ private:
 
   static QStringList defaultVoices();
 
-  static QString resolveStartScript();
+  static QString resolveNodeBinary();
+  static QString resolveHeadTtsEntry();
+  static QString resolveHeadTtsWorkingDir();
 
 private:
   QNetworkAccessManager *m_networkManager = nullptr;
@@ -146,7 +145,6 @@ private:
 
   QStringList m_availableVoices;
 
-  // Managed lifecycle.
   QProcess *m_headTtsProcess = nullptr;
   QTimer *m_healthCheckTimer = nullptr;
   int m_healthAttempts = 0;

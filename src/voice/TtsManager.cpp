@@ -39,51 +39,69 @@ TtsManager::~TtsManager() {
   cleanupAudioSink();
 }
 
-QString TtsManager::resolveStartScript() {
-  // 1. Environment variable. Highest priority. Set this to override
-  //    everything else, including a compiled-in path.
+QString TtsManager::resolveNodeBinary() {
   const QString fromEnv =
-      qEnvironmentVariable("QF_HEADTTS_SCRIPT").trimmed();
+      qEnvironmentVariable("QF_NODE_CLI").trimmed();
 
   if (!fromEnv.isEmpty() && QFileInfo::exists(fromEnv)) {
     return fromEnv;
   }
 
-  // 2. Compile-time default. CMake bakes in the absolute path it
-  //    cloned HeadTTS to. This is the mechanism that actually works,
-  //    because the build system knows the location at configure time.
-#ifdef QF_HEADTTS_SCRIPT_DEFAULT
-  const QString fromBuild =
-      QStringLiteral(QF_HEADTTS_SCRIPT_DEFAULT);
+#ifdef QF_NODE_CLI_DEFAULT
+  const QString fromBuild = QStringLiteral(QF_NODE_CLI_DEFAULT);
 
   if (!fromBuild.isEmpty() && QFileInfo::exists(fromBuild)) {
     return fromBuild;
   }
 #endif
 
-  // 3. Development fallbacks. These are for hand-built trees where the
-  //    compile-time define is absent. They are guesses about the tree
-  //    layout and will break if the tree moves; they are a convenience,
-  //    not the mechanism.
-  const QString appDir = QCoreApplication::applicationDirPath();
+  // Development fallback. Search nvm's directory for the newest
+  // installed node. This is a convenience, not the mechanism.
+  const QString nvmRoot =
+      QDir::homePath() + QStringLiteral("/.nvm/versions/node");
 
-  const QStringList candidates = {
-      QDir(appDir).filePath(
-          QStringLiteral("../../external/QF-ML/external/HeadTTS/start.sh")),
-      QDir(appDir).filePath(
-          QStringLiteral("../../../external/HeadTTS/start.sh")),
-      QDir(appDir).filePath(QStringLiteral("external/HeadTTS/start.sh")),
-      QDir::current().filePath(
-          QStringLiteral("external/HeadTTS/start.sh")),
-  };
+  QDir nvmDir(nvmRoot);
 
-  for (const QString &candidate : candidates) {
-    const QString canonical = QFileInfo(candidate).canonicalFilePath();
+  const QStringList versions =
+      nvmDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
 
-    if (!canonical.isEmpty() && QFileInfo(canonical).isExecutable()) {
-      return canonical;
+  for (int i = versions.size() - 1; i >= 0; --i) {
+    const QString candidate =
+        nvmDir.filePath(versions.at(i) + QStringLiteral("/bin/node"));
+
+    if (QFileInfo::exists(candidate)) {
+      return candidate;
     }
   }
+
+  return {};
+}
+
+QString TtsManager::resolveHeadTtsEntry() {
+#ifdef QF_HEADTTS_DIR_DEFAULT
+  const QString dir = QStringLiteral(QF_HEADTTS_DIR_DEFAULT);
+
+  if (!dir.isEmpty()) {
+    const QString entry =
+        QDir(dir).filePath(QStringLiteral("modules/headtts-node.mjs"));
+
+    if (QFileInfo::exists(entry)) {
+      return entry;
+    }
+  }
+#endif
+
+  return {};
+}
+
+QString TtsManager::resolveHeadTtsWorkingDir() {
+#ifdef QF_HEADTTS_DIR_DEFAULT
+  const QString dir = QStringLiteral(QF_HEADTTS_DIR_DEFAULT);
+
+  if (!dir.isEmpty() && QFileInfo::exists(dir)) {
+    return dir;
+  }
+#endif
 
   return {};
 }
@@ -93,25 +111,53 @@ void TtsManager::startHeadTts() {
     return;
   }
 
-  const QString script = resolveStartScript();
+  const QString node = resolveNodeBinary();
+  const QString entry = resolveHeadTtsEntry();
+  const QString workDir = resolveHeadTtsWorkingDir();
 
-  if (script.isEmpty()) {
-    qWarning() << "[TTS] HeadTTS start script not found."
-               << "Set QF_HEADTTS_SCRIPT or run the server manually.";
-
+  if (node.isEmpty()) {
+    qWarning() << "[TTS] node binary not found. Set QF_NODE_CLI or "
+                  "ensure nvm has an installed Node.";
     emit errorOccurred(
-        QStringLiteral("HeadTTS start script not found. "
-                       "Set QF_HEADTTS_SCRIPT or run the server manually."));
-
+        QStringLiteral("node binary not found. Set QF_NODE_CLI."));
     return;
   }
 
-  qDebug() << "[TTS] Starting HeadTTS:" << script;
+  if (entry.isEmpty() || workDir.isEmpty()) {
+    qWarning() << "[TTS] HeadTTS entry script not found. The tree "
+                  "was probably built without HeadTTS installed.";
+    emit errorOccurred(
+        QStringLiteral("HeadTTS entry script not found."));
+    return;
+  }
+
+  qDebug() << "[TTS] Starting HeadTTS:";
+  qDebug() << "[TTS]   node:" << node;
+  qDebug() << "[TTS]   entry:" << entry;
+  qDebug() << "[TTS]   cwd:" << workDir;
 
   m_headTtsProcess = new QProcess(this);
 
-  m_headTtsProcess->setProcessChannelMode(
-      QProcess::MergedChannels);
+  m_headTtsProcess->setWorkingDirectory(workDir);
+
+  // Inherit the parent's environment, but that is only a starting
+  // point. The child does not need npm or node on PATH, because node
+  // is invoked by absolute path and its own binary directory is
+  // added explicitly so any subprocess node spawns can find its own
+  // siblings.
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+
+  const QFileInfo nodeInfo(node);
+  const QString nodeBinDir = nodeInfo.absolutePath();
+
+  const QString existingPath = env.value(QStringLiteral("PATH"));
+
+  env.insert(QStringLiteral("PATH"),
+             nodeBinDir + QLatin1Char(':') + existingPath);
+
+  m_headTtsProcess->setProcessEnvironment(env);
+
+  m_headTtsProcess->setProcessChannelMode(QProcess::MergedChannels);
 
   connect(m_headTtsProcess, &QProcess::finished, this,
           &TtsManager::onProcessFinished);
@@ -128,7 +174,7 @@ void TtsManager::startHeadTts() {
             }
           });
 
-  m_headTtsProcess->start(script, QStringList());
+  m_headTtsProcess->start(node, QStringList{entry});
 
   m_ownsProcess = true;
 }
