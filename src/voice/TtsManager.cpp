@@ -40,14 +40,8 @@ TtsManager::~TtsManager() {
 }
 
 QString TtsManager::resolveStartScript() {
-  // The start script is written by CMake into the HeadTTS clone, which
-  // lives next to the qf-inference sources.
-  //
-  // Search order:
-  //   1. QF_HEADTTS_SCRIPT environment variable.
-  //   2. <app dir>/../../../external/HeadTTS/start.sh  (build tree).
-  //   3. <app dir>/external/HeadTTS/start.sh           (deployed).
-  //   4. <source dir>/external/HeadTTS/start.sh        (dev fallback).
+  // 1. Environment variable. Highest priority. Set this to override
+  //    everything else, including a compiled-in path.
   const QString fromEnv =
       qEnvironmentVariable("QF_HEADTTS_SCRIPT").trimmed();
 
@@ -55,9 +49,27 @@ QString TtsManager::resolveStartScript() {
     return fromEnv;
   }
 
+  // 2. Compile-time default. CMake bakes in the absolute path it
+  //    cloned HeadTTS to. This is the mechanism that actually works,
+  //    because the build system knows the location at configure time.
+#ifdef QF_HEADTTS_SCRIPT_DEFAULT
+  const QString fromBuild =
+      QStringLiteral(QF_HEADTTS_SCRIPT_DEFAULT);
+
+  if (!fromBuild.isEmpty() && QFileInfo::exists(fromBuild)) {
+    return fromBuild;
+  }
+#endif
+
+  // 3. Development fallbacks. These are for hand-built trees where the
+  //    compile-time define is absent. They are guesses about the tree
+  //    layout and will break if the tree moves; they are a convenience,
+  //    not the mechanism.
   const QString appDir = QCoreApplication::applicationDirPath();
 
   const QStringList candidates = {
+      QDir(appDir).filePath(
+          QStringLiteral("../../external/QF-ML/external/HeadTTS/start.sh")),
       QDir(appDir).filePath(
           QStringLiteral("../../../external/HeadTTS/start.sh")),
       QDir(appDir).filePath(QStringLiteral("external/HeadTTS/start.sh")),
@@ -222,17 +234,6 @@ bool TtsManager::initialize(const QString &serverUrl, bool autoStart) {
     startHeadTts();
   }
 
-  // Wait for the server to answer. This blocks the caller but is
-  // bounded by MAX_HEALTH_ATTEMPTS * HEALTH_CHECK_INTERVAL_MS.
-  //
-  // We do not run a nested event loop here, because that is fragile in
-  // a constructor path. Instead, the first synthesis will fail and
-  // emit an error if the server is not up yet.
-  //
-  // The alternative, a QEventLoop with a timeout, would allow
-  // initialize() to return only once the server is truly ready. That
-  // is what the Docker path did. It is worth doing if the first
-  // synthesis failing is unacceptable.
   return true;
 }
 

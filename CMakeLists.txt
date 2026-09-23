@@ -29,34 +29,24 @@ qt_standard_project_setup()
 
 include(FetchContent)
 
+# =============================================================================
+# 0. nvm Node discovery
+# =============================================================================
+#
 # nvm installs Node under ~/.nvm/versions/node/<version>/bin.
 # find_program does not look there by default because CLion launches
 # CMake with a PATH that predates nvm. Glob every installed version so
 # a Node version bump is picked up automatically.
+# =============================================================================
+
 file(
         GLOB
         NVM_NODE_BINS
         "$ENV{HOME}/.nvm/versions/node/*/bin"
 )
 
-
 # =============================================================================
 # 1. NeMo-Speech.cpp
-# =============================================================================
-#
-# This project uses NeMo-Speech.cpp as its speech runtime.
-#
-# Removed completely:
-#   - whisper.cpp
-#   - parakeet.cpp
-#
-# NeMo provides:
-#   - ASR
-#   - stable C ABI
-#   - ggml runtime
-#   - Vulkan backend
-#
-# We only build ASR.
 # =============================================================================
 
 set(
@@ -91,10 +81,6 @@ if (NOT EXISTS
     )
 
 endif ()
-
-# -----------------------------------------------------------------------------
-# NeMo component selection
-# -----------------------------------------------------------------------------
 
 set(
         NEMO_SPEECH_BUILD_ASR
@@ -216,10 +202,6 @@ set(
         FORCE
 )
 
-# -----------------------------------------------------------------------------
-# ggml backend
-# -----------------------------------------------------------------------------
-
 set(
         GGML_VULKAN
         ON
@@ -244,18 +226,10 @@ set(
         FORCE
 )
 
-# =============================================================================
-# 1A. Embedded NeMo include path
-# =============================================================================
-
 include_directories(
         BEFORE
         "${NEMO_SPEECH_SOURCE_DIR}/include"
 )
-
-# =============================================================================
-# 1B. Vulkan-Headers compatibility patch
-# =============================================================================
 
 set(
         NEMO_VULKAN_CPP
@@ -332,10 +306,6 @@ else ()
 
 endif ()
 
-# -----------------------------------------------------------------------------
-# Build NeMo-Speech.cpp
-# -----------------------------------------------------------------------------
-
 add_subdirectory(
         "${NEMO_SPEECH_SOURCE_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/nemo-speech"
@@ -362,9 +332,6 @@ endif ()
 
 # =============================================================================
 # 2. ONNX Runtime
-# =============================================================================
-#
-# Used by openWakeWord.
 # =============================================================================
 
 set(
@@ -1021,6 +988,7 @@ message(
         STATUS
         "Embedding model directory: ${QF_EMBEDDING_DIR}"
 )
+
 # =============================================================================
 # 3G. HeadTTS (Kokoro with native visemes and timestamps)
 # =============================================================================
@@ -1028,27 +996,25 @@ message(
 # HeadTTS is a Node.js server that runs the timestamped Kokoro ONNX
 # model and returns native Oculus 15 visemes with per-phoneme timing.
 #
-# This block does four things:
+# This block does five things:
 #
 #   1. Clones met4citizen/HeadTTS if not already present.
 #   2. Runs npm install and installs the "ws" package, which
 #      headtts-node.mjs imports but package.json does not declare.
 #   3. Writes a config file tuned for QF-ML.
-#   4. Writes a start.sh wrapper and a CMake target "headtts-run" so
-#      the server can be launched from the CLion run configuration
-#      dropdown.
+#   4. Writes a start.sh wrapper.
+#   5. Registers a CMake target "headtts-run" so the server can be
+#      launched from the CLion run configuration dropdown.
 #
-# The server is not started at build time. Start it with:
-#
-#   external/HeadTTS/start.sh
-#
-# or by selecting the headtts-run target in CLion.
+# The absolute path of start.sh is baked into the qf-inference target
+# as QF_HEADTTS_SCRIPT_DEFAULT, so TtsManager can spawn the server
+# without guessing where the tree lives.
 #
 # Idempotency is guarded by three sentinels:
 #
-#   external/HeadTTS/.git                 -> clone succeeded
+#   external/HeadTTS/.git                          -> clone succeeded
 #   external/HeadTTS/node_modules/.package-lock.json -> npm install succeeded
-#   external/HeadTTS/node_modules/ws      -> ws install succeeded
+#   external/HeadTTS/node_modules/ws               -> ws install succeeded
 #
 # A failed step on any prior configure will be retried on the next.
 # =============================================================================
@@ -1156,11 +1122,6 @@ if (NODE_CLI AND NPM_CLI)
     # -------------------------------------------------------------------------
     # 2. npm install
     # -------------------------------------------------------------------------
-    #
-    # The sentinel is .package-lock.json inside node_modules, not the
-    # node_modules directory itself. npm writes that file only when
-    # install succeeds, so a partial install will be retried.
-    # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_DIR}/package.json"
             AND NOT EXISTS "${HEADTTS_NPM_SENTINEL}")
@@ -1211,11 +1172,6 @@ if (NODE_CLI AND NPM_CLI)
 
     # -------------------------------------------------------------------------
     # 3. ws package
-    # -------------------------------------------------------------------------
-    #
-    # headtts-node.mjs imports "ws", but package.json does not declare
-    # it. Install it explicitly. This is the one dependency that has
-    # caused the "Cannot find package 'ws'" startup failure.
     # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_NPM_SENTINEL}"
@@ -1268,10 +1224,6 @@ if (NODE_CLI AND NPM_CLI)
 
     # -------------------------------------------------------------------------
     # 4. Config
-    # -------------------------------------------------------------------------
-    #
-    # Written once, on first configure. Subsequent configures leave it
-    # alone so manual edits are not overwritten.
     # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_NPM_SENTINEL}"
@@ -1358,14 +1310,6 @@ if (NODE_CLI AND NPM_CLI)
     # -------------------------------------------------------------------------
     # 6. headtts-run target
     # -------------------------------------------------------------------------
-    #
-    # A CMake target CLion can launch. Select "headtts-run" in the run
-    # configuration dropdown and press the green arrow.
-    #
-    # The target is a custom target with a command that runs the start
-    # script. It is USES_TERMINAL so CLion routes stdout to the run
-    # console and keeps the process alive.
-    # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_START_SCRIPT}")
 
@@ -1398,12 +1342,7 @@ if (NODE_CLI AND NPM_CLI)
 
         message(
                 STATUS
-                "Run it with the headtts-run target in CLion,"
-        )
-
-        message(
-                STATUS
-                "or: ${HEADTTS_START_SCRIPT}"
+                "Start script: ${HEADTTS_START_SCRIPT}"
         )
 
         message(
@@ -1436,6 +1375,7 @@ else ()
     )
 
 endif ()
+
 # =============================================================================
 # 4. OCR Libraries
 # =============================================================================
@@ -1555,6 +1495,48 @@ target_include_directories(
         "${NEMO_SPEECH_SOURCE_DIR}/include"
 
 )
+
+# -----------------------------------------------------------------------------
+# HeadTTS start script location.
+#
+# The absolute path of the start script is baked into the library at
+# compile time. TtsManager reads it as a fallback after the
+# QF_HEADTTS_SCRIPT environment variable. This is what makes the
+# server location autodetect at runtime: the build system records the
+# location when it is genuinely known, rather than the runtime
+# guessing from the binary's directory.
+#
+# Guarded by an EXISTS check so a tree without HeadTTS still builds.
+# -----------------------------------------------------------------------------
+
+if (EXISTS "${HEADTTS_START_SCRIPT}")
+
+    target_compile_definitions(
+            qf-inference
+
+            PRIVATE
+
+            QF_HEADTTS_SCRIPT_DEFAULT="${HEADTTS_START_SCRIPT}"
+    )
+
+    message(
+            STATUS
+            "HeadTTS start script baked into qf-inference:"
+    )
+
+    message(
+            STATUS
+            "  ${HEADTTS_START_SCRIPT}"
+    )
+
+else ()
+
+    message(
+            STATUS
+            "HeadTTS not present; QF_HEADTTS_SCRIPT_DEFAULT not set."
+    )
+
+endif ()
 
 target_link_libraries(
         qf-inference
@@ -1694,10 +1676,6 @@ else ()
 
 endif ()
 
-# -----------------------------------------------------------------------------
-# NeMo ASR shared libraries
-# -----------------------------------------------------------------------------
-
 if (TARGET nemo_speech_asr_c)
 
     add_custom_command(
@@ -1730,10 +1708,6 @@ if (TARGET nemo_speech_asr)
 
 endif ()
 
-# -----------------------------------------------------------------------------
-# ggml Vulkan
-# -----------------------------------------------------------------------------
-
 if (TARGET ggml-vulkan)
 
     add_custom_command(
@@ -1749,10 +1723,6 @@ if (TARGET ggml-vulkan)
     )
 
 endif ()
-
-# -----------------------------------------------------------------------------
-# Other shared NeMo/ggml targets
-# -----------------------------------------------------------------------------
 
 foreach (
         NEMO_TARGET
