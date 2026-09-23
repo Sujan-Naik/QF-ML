@@ -7,8 +7,6 @@
 #include <QBuffer>
 #include <QDateTime>
 #include <QMutex>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
 #include <QObject>
 #include <QProcess>
 #include <QQueue>
@@ -16,22 +14,36 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVector>
+#include <QWebSocket>
 
 #include <memory>
 
-// TtsManager talks to a HeadTTS server over HTTP. HeadTTS runs the
-// timestamped Kokoro ONNX model and returns audio, Oculus visemes, and
-// per-viseme timing in one response.
+// TtsManager talks to a HeadTTS server over WebSocket. HeadTTS runs
+// the timestamped Kokoro ONNX model and returns audio, Oculus visemes,
+// and per-viseme timing.
 //
-// The server is launched by absolute path: node is invoked with the
-// HeadTTS entry module as its argument, with the HeadTTS directory as
-// the working directory. npm is not involved, start.sh is not
-// involved, and nothing in the launch path depends on the parent
-// process's PATH. Both the node binary and the HeadTTS directory are
-// baked into qf-inference by CMake at configure time.
+// The WebSocket API is used rather than REST because the REST path on
+// the HeadTTS Node server produces malformed audio on this platform.
+// The browser demo, which uses WebSocket, produces correct audio. The
+// two paths are handled by different code in headtts-node.mjs.
 //
-// If the compile-time paths are wrong or missing, the environment
-// variables QF_NODE_CLI and QF_HEADTTS_DIR can override them.
+// Protocol:
+//
+//   1. On connect, send one "setup" message with voice, language,
+//      speed, audioEncoding. The server is stateful per socket, so
+//      this is re-sent only when a setting changes.
+//   2. For each utterance, send a "synthesize" message with a unique
+//      id and the input text.
+//   3. The server replies with one text message of type "audio"
+//      carrying words, visemes, vtimes, vdurations, and a "ref"
+//      field matching the request id.
+//   4. Immediately after, the server sends one binary message with
+//      the raw PCM samples (or WAV, depending on audioEncoding).
+//
+//   Binary messages are correlated to their audio metadata by order:
+//   the binary always follows the audio text message for the same
+//   request. Interleaving only happens if more than one synthesis is
+//   in flight, which TtsManager prevents.
 class TtsManager : public QObject {
   Q_OBJECT
 
@@ -81,6 +93,16 @@ signals:
   void chunkPlaybackStarted(const AudioChunk &chunk);
 
 private slots:
+  void onSocketConnected();
+
+  void onSocketDisconnected();
+
+  void onSocketError(QAbstractSocket::SocketError error);
+
+  void onTextMessageReceived(const QString &message);
+
+  void onBinaryMessageReceived(const QByteArray &data);
+
   void playNextInQueue();
 
   void onAudioStateChanged(QAudio::State state);
@@ -89,14 +111,10 @@ private slots:
 
   void onProcessError(QProcess::ProcessError error);
 
-  void checkServerHealth();
-
 private:
-  void requestSynthesis(const QString &text, int speakerId,
-                        quint64 generation);
+  void sendSetupMessage();
 
-  void processReply(QNetworkReply *reply, quint64 generation,
-                    int speakerId);
+  void requestSynthesis(const QString &text, int speakerId);
 
   void finishCurrentPlayback();
 
@@ -105,11 +123,6 @@ private:
   void startHeadTts();
   void stopHeadTts();
 
-  static bool parseHeadTtsResponse(const QByteArray &payload,
-                                   int speakerId,
-                                   AudioChunk &out,
-                                   QString &error);
-
   static QStringList defaultVoices();
 
   static QString resolveNodeBinary();
@@ -117,11 +130,21 @@ private:
   static QString resolveHeadTtsWorkingDir();
 
 private:
-  QNetworkAccessManager *m_networkManager = nullptr;
+  QWebSocket m_socket;
 
-  QUrl m_serverUrl;
+  // Outstanding request bookkeeping. Only one synthesis is in flight
+  // at a time, so a single set of fields is enough.
+  bool m_synthesisInFlight = false;
+  int m_currentRequestId = 0;
+  int m_currentSpeakerId = 0;
+  AudioChunk m_pendingChunk;
+  bool m_awaitingBinary = false;
 
-  QNetworkReply *m_currentReply = nullptr;
+  // Setup state. Re-sent whenever it changes.
+  bool m_setupSent = false;
+  QString m_sentVoice;
+  QString m_sentLanguage;
+  QString m_sentAudioEncoding;
 
   std::unique_ptr<QAudioSink> m_audioSink;
 
@@ -139,20 +162,14 @@ private:
   bool m_isPlaying = false;
   bool m_playbackCompletionPending = false;
 
-  quint64 m_generation = 0;
-
   QString m_voice = QStringLiteral("af_bella");
 
   QStringList m_availableVoices;
 
   QProcess *m_headTtsProcess = nullptr;
-  QTimer *m_healthCheckTimer = nullptr;
-  int m_healthAttempts = 0;
   bool m_ownsProcess = false;
 
   static constexpr int DEFAULT_PORT = 8882;
-  static constexpr int HEALTH_CHECK_INTERVAL_MS = 500;
-  static constexpr int MAX_HEALTH_ATTEMPTS = 120;
 };
 
 #endif // TTSMANAGER_H

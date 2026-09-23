@@ -15,7 +15,7 @@ find_package(Qt6 REQUIRED COMPONENTS
         Widgets
         Network
         Multimedia
-
+        WebSockets
         WebChannel
         TextToSpeech
 )
@@ -968,6 +968,7 @@ target_link_libraries(
         Qt6::Network
         Qt6::Multimedia
         Qt6::TextToSpeech
+        Qt6::WebSockets
 
         PRIVATE
 

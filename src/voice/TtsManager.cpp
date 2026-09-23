@@ -10,31 +10,32 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMediaDevices>
-#include <QNetworkProxy>
-#include <QNetworkRequest>
 
 TtsManager::TtsManager(QObject *parent)
-    : QObject(parent), m_networkManager(new QNetworkAccessManager(this)),
-      m_audioBuffer(this), m_healthCheckTimer(new QTimer(this)) {
-  m_networkManager->setProxy(QNetworkProxy::NoProxy);
-
+    : QObject(parent), m_audioBuffer(this) {
   m_availableVoices = defaultVoices();
 
-  m_healthCheckTimer->setInterval(HEALTH_CHECK_INTERVAL_MS);
+  connect(&m_socket, &QWebSocket::connected, this,
+          &TtsManager::onSocketConnected);
 
-  connect(m_healthCheckTimer, &QTimer::timeout, this,
-          &TtsManager::checkServerHealth);
+  connect(&m_socket, &QWebSocket::disconnected, this,
+          &TtsManager::onSocketDisconnected);
+
+  connect(&m_socket, qOverload<QAbstractSocket::SocketError>(&QWebSocket::error),
+        this, &TtsManager::onSocketError);
+
+  connect(&m_socket, &QWebSocket::textMessageReceived, this,
+          &TtsManager::onTextMessageReceived);
+
+  connect(&m_socket, &QWebSocket::binaryMessageReceived, this,
+          &TtsManager::onBinaryMessageReceived);
 }
 
 TtsManager::~TtsManager() {
   stopAndClear();
   stopHeadTts();
 
-  if (m_currentReply) {
-    m_currentReply->abort();
-    m_currentReply->deleteLater();
-    m_currentReply = nullptr;
-  }
+  m_socket.close();
 
   cleanupAudioSink();
 }
@@ -55,8 +56,6 @@ QString TtsManager::resolveNodeBinary() {
   }
 #endif
 
-  // Development fallback. Search nvm's directory for the newest
-  // installed node. This is a convenience, not the mechanism.
   const QString nvmRoot =
       QDir::homePath() + QStringLiteral("/.nvm/versions/node");
 
@@ -116,16 +115,14 @@ void TtsManager::startHeadTts() {
   const QString workDir = resolveHeadTtsWorkingDir();
 
   if (node.isEmpty()) {
-    qWarning() << "[TTS] node binary not found. Set QF_NODE_CLI or "
-                  "ensure nvm has an installed Node.";
+    qWarning() << "[TTS] node binary not found.";
     emit errorOccurred(
         QStringLiteral("node binary not found. Set QF_NODE_CLI."));
     return;
   }
 
   if (entry.isEmpty() || workDir.isEmpty()) {
-    qWarning() << "[TTS] HeadTTS entry script not found. The tree "
-                  "was probably built without HeadTTS installed.";
+    qWarning() << "[TTS] HeadTTS entry script not found.";
     emit errorOccurred(
         QStringLiteral("HeadTTS entry script not found."));
     return;
@@ -140,11 +137,6 @@ void TtsManager::startHeadTts() {
 
   m_headTtsProcess->setWorkingDirectory(workDir);
 
-  // Inherit the parent's environment, but that is only a starting
-  // point. The child does not need npm or node on PATH, because node
-  // is invoked by absolute path and its own binary directory is
-  // added explicitly so any subprocess node spawns can find its own
-  // siblings.
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
 
   const QFileInfo nodeInfo(node);
@@ -184,8 +176,6 @@ void TtsManager::stopHeadTts() {
     return;
   }
 
-  m_healthCheckTimer->stop();
-
   if (m_headTtsProcess->state() != QProcess::NotRunning) {
     qDebug() << "[TTS] Stopping HeadTTS.";
 
@@ -214,15 +204,10 @@ void TtsManager::onProcessFinished(int exitCode,
   }
 
   m_ownsProcess = false;
-
-  emit errorOccurred(QStringLiteral("HeadTTS process exited unexpectedly."));
 }
 
 void TtsManager::onProcessError(QProcess::ProcessError error) {
   qWarning() << "[TTS] HeadTTS process error:" << error;
-
-  emit errorOccurred(
-      QStringLiteral("HeadTTS process error: %1").arg(error));
 }
 
 QStringList TtsManager::defaultVoices() {
@@ -259,28 +244,249 @@ bool TtsManager::initialize(const QString &serverUrl, bool autoStart) {
   if (m_initialized)
     return true;
 
+  QUrl url;
+
   if (serverUrl.isEmpty()) {
-    m_serverUrl = QUrl(QStringLiteral("http://127.0.0.1:%1")
-                           .arg(DEFAULT_PORT));
+    url = QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(DEFAULT_PORT));
   } else {
-    m_serverUrl = QUrl(serverUrl);
+    url = QUrl(serverUrl);
   }
 
-  if (!m_serverUrl.isValid()) {
+  if (!url.isValid()) {
     qWarning() << "[TTS] Invalid server URL:" << serverUrl;
     return false;
   }
 
   m_initialized = true;
 
-  qDebug() << "[TTS] Using HeadTTS server:" << m_serverUrl.toString()
+  qDebug() << "[TTS] Using HeadTTS server:" << url.toString()
            << "autoStart=" << autoStart;
 
   if (autoStart) {
     startHeadTts();
   }
 
+  m_socket.open(url);
+
   return true;
+}
+
+void TtsManager::onSocketConnected() {
+  qDebug() << "[TTS] WebSocket connected.";
+
+  m_setupSent = false;
+
+  emit serverReady();
+}
+
+void TtsManager::onSocketDisconnected() {
+  qDebug() << "[TTS] WebSocket disconnected.";
+
+  m_setupSent = false;
+  m_synthesisInFlight = false;
+  m_awaitingBinary = false;
+}
+
+void TtsManager::onSocketError(QAbstractSocket::SocketError error) {
+  qWarning() << "[TTS] WebSocket error:" << error;
+
+  emit errorOccurred(
+      QStringLiteral("HeadTTS WebSocket error: %1").arg(error));
+}
+
+void TtsManager::sendSetupMessage() {
+  const QString language = QStringLiteral("en-us");
+  const QString audioEncoding = QStringLiteral("pcm");
+
+  if (m_setupSent && m_sentVoice == m_voice &&
+      m_sentLanguage == language &&
+      m_sentAudioEncoding == audioEncoding) {
+    return;
+  }
+
+  QJsonObject data;
+  data["voice"] = m_voice;
+  data["language"] = language;
+  data["speed"] = 1.0;
+  data["audioEncoding"] = audioEncoding;
+
+  QJsonObject message;
+  message["type"] = QStringLiteral("setup");
+  message["id"] = 1;
+  message["data"] = data;
+
+  const QByteArray body =
+      QJsonDocument(message).toJson(QJsonDocument::Compact);
+
+  m_socket.sendTextMessage(QString::fromUtf8(body));
+
+  m_setupSent = true;
+  m_sentVoice = m_voice;
+  m_sentLanguage = language;
+  m_sentAudioEncoding = audioEncoding;
+
+  qDebug() << "[TTS] Setup sent: voice=" << m_voice;
+}
+
+void TtsManager::enqueueSentence(const QString &sentence, int speakerId) {
+  const QString cleaned = sentence.trimmed();
+
+  if (!m_enabled || !m_initialized || cleaned.isEmpty()) {
+    return;
+  }
+
+  requestSynthesis(cleaned, speakerId);
+}
+
+void TtsManager::requestSynthesis(const QString &text, int speakerId) {
+  if (m_synthesisInFlight) {
+    qWarning() << "[TTS] Synthesis already in flight;"
+               << "ignoring overlapping sentence.";
+    return;
+  }
+
+  if (m_socket.state() != QAbstractSocket::ConnectedState) {
+    qWarning() << "[TTS] Socket not connected; dropping sentence.";
+    emit errorOccurred(QStringLiteral("HeadTTS socket is not connected."));
+    return;
+  }
+
+  sendSetupMessage();
+
+  m_currentRequestId = (m_currentRequestId % 100000) + 1;
+  m_currentSpeakerId = speakerId;
+  m_synthesisInFlight = true;
+
+  qDebug() << "[TTS] Synthesizing voice=" << m_voice
+           << "text length=" << text.length()
+           << "requestId=" << m_currentRequestId;
+
+  QJsonObject data;
+  data["input"] = text;
+
+  QJsonObject message;
+  message["type"] = QStringLiteral("synthesize");
+  message["id"] = m_currentRequestId;
+  message["data"] = data;
+
+  const QByteArray body =
+      QJsonDocument(message).toJson(QJsonDocument::Compact);
+
+  m_socket.sendTextMessage(QString::fromUtf8(body));
+}
+
+void TtsManager::onTextMessageReceived(const QString &message) {
+  const QJsonDocument doc =
+      QJsonDocument::fromJson(message.toUtf8());
+
+  if (!doc.isObject()) {
+    qWarning() << "[TTS] Non-object text message from HeadTTS.";
+    return;
+  }
+
+  const QJsonObject object = doc.object();
+
+  const QString type = object.value(QStringLiteral("type")).toString();
+
+  if (type == QStringLiteral("error")) {
+    const QJsonObject data =
+        object.value(QStringLiteral("data")).toObject();
+
+    const QString error =
+        data.value(QStringLiteral("error")).toString();
+
+    qWarning() << "[TTS] HeadTTS error:" << error;
+
+    m_synthesisInFlight = false;
+    m_awaitingBinary = false;
+
+    emit errorOccurred(error);
+
+    return;
+  }
+
+  if (type != QStringLiteral("audio")) {
+    return;
+  }
+
+  const int ref = object.value(QStringLiteral("ref")).toInt();
+
+  if (ref != m_currentRequestId) {
+    qDebug() << "[TTS] Ignoring audio for stale request" << ref;
+    return;
+  }
+
+  const QJsonObject data =
+      object.value(QStringLiteral("data")).toObject();
+
+  m_pendingChunk = AudioChunk();
+  m_pendingChunk.sampleRate = 24000;
+  m_pendingChunk.speakerId = m_currentSpeakerId;
+  m_pendingChunk.timestamp = QDateTime::currentMSecsSinceEpoch();
+
+  const QJsonArray visemeArray =
+      data.value(QStringLiteral("visemes")).toArray();
+  const QJsonArray vtimeArray =
+      data.value(QStringLiteral("vtimes")).toArray();
+  const QJsonArray vdurationArray =
+      data.value(QStringLiteral("vdurations")).toArray();
+
+  const int count =
+      qMin(visemeArray.size(), qMin(vtimeArray.size(), vdurationArray.size()));
+
+  QStringList visemes;
+  QVector<int> vtimes;
+  QVector<int> vdurations;
+
+  visemes.reserve(count);
+  vtimes.reserve(count);
+  vdurations.reserve(count);
+
+  for (int i = 0; i < count; ++i) {
+    visemes.append(visemeArray.at(i).toString());
+    vtimes.append(vtimeArray.at(i).toInt());
+    vdurations.append(vdurationArray.at(i).toInt());
+  }
+
+  m_pendingChunk.visemes =
+      VisemeMap::buildTimeline(visemes, vtimes, vdurations);
+
+  m_awaitingBinary = true;
+}
+
+void TtsManager::onBinaryMessageReceived(const QByteArray &data) {
+  if (!m_awaitingBinary) {
+    qDebug() << "[TTS] Unexpected binary message; ignoring.";
+    return;
+  }
+
+  m_awaitingBinary = false;
+  m_synthesisInFlight = false;
+
+  if (data.isEmpty()) {
+    qWarning() << "[TTS] Empty binary audio message.";
+    return;
+  }
+
+  m_pendingChunk.data = data;
+
+  qDebug() << "[TTS] Received audio:"
+           << data.size() << "bytes,"
+           << m_pendingChunk.visemes.size() << "visemes";
+
+  AudioChunk chunk = m_pendingChunk;
+  m_pendingChunk = AudioChunk();
+
+  {
+    QMutexLocker locker(&m_queueMutex);
+    m_audioQueue.enqueue(chunk);
+  }
+
+  emit sentenceQueued(m_currentSpeakerId);
+  emit chunkReady(chunk);
+
+  if (!m_isPlaying)
+    playNextInQueue();
 }
 
 void TtsManager::setEnabled(bool enabled) {
@@ -305,6 +511,7 @@ void TtsManager::setVoice(const QString &voice) {
     return;
 
   m_voice = normalized;
+  m_setupSent = false;
 
   qDebug() << "[TTS] Voice changed to:" << m_voice;
 
@@ -312,208 +519,6 @@ void TtsManager::setVoice(const QString &voice) {
 }
 
 QString TtsManager::voice() const { return m_voice; }
-
-void TtsManager::enqueueSentence(const QString &sentence, int speakerId) {
-  const QString cleaned = sentence.trimmed();
-
-  if (!m_enabled || !m_initialized || cleaned.isEmpty()) {
-    return;
-  }
-
-  requestSynthesis(cleaned, speakerId, m_generation);
-}
-
-void TtsManager::requestSynthesis(const QString &text, int speakerId,
-                                  quint64 generation) {
-  if (!m_enabled || !m_initialized || generation != m_generation) {
-    return;
-  }
-
-  const QString url =
-      m_serverUrl.toString() + QStringLiteral("/v1/synthesize");
-
-  qDebug() << "[TTS] Synthesizing voice=" << m_voice
-           << "text length=" << text.length() << "generation=" << generation;
-
-  QJsonObject payload;
-
-  payload["input"] = text;
-  payload["voice"] = m_voice;
-  payload["language"] = QStringLiteral("en-us");
-  payload["speed"] = 1.0;
-  payload["audioEncoding"] = QStringLiteral("pcm");
-
-  const QByteArray body =
-      QJsonDocument(payload).toJson(QJsonDocument::Compact);
-
-  QNetworkRequest request{QUrl(url)};
-
-  request.setHeader(QNetworkRequest::ContentTypeHeader,
-                    QStringLiteral("application/json"));
-
-  QNetworkReply *reply = m_networkManager->post(request, body);
-
-  m_currentReply = reply;
-
-  connect(reply, &QNetworkReply::finished, this,
-          [this, reply, generation, speakerId]() {
-            processReply(reply, generation, speakerId);
-          });
-}
-
-void TtsManager::processReply(QNetworkReply *reply, quint64 generation,
-                              int speakerId) {
-  if (!reply)
-    return;
-
-  if (m_currentReply == reply)
-    m_currentReply = nullptr;
-
-  if (generation != m_generation) {
-    qDebug() << "[TTS] Ignoring stale synthesis reply."
-             << "reply generation=" << generation
-             << "current generation=" << m_generation;
-
-    reply->deleteLater();
-
-    return;
-  }
-
-  if (!m_enabled) {
-    reply->deleteLater();
-
-    return;
-  }
-
-  if (reply->error() != QNetworkReply::NoError) {
-    const QString error = reply->errorString();
-
-    reply->deleteLater();
-
-    emit errorOccurred(QStringLiteral("TTS request failed: %1").arg(error));
-
-    return;
-  }
-
-  const int status =
-      reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-
-  if (status != 200) {
-    const QByteArray response = reply->readAll();
-
-    QString error = QStringLiteral("HeadTTS returned HTTP %1").arg(status);
-
-    if (!response.isEmpty()) {
-      error += QStringLiteral(": ") + QString::fromUtf8(response);
-    }
-
-    reply->deleteLater();
-
-    emit errorOccurred(error);
-
-    return;
-  }
-
-  const QByteArray payload = reply->readAll();
-
-  if (payload.isEmpty()) {
-    reply->deleteLater();
-
-    emit errorOccurred(QStringLiteral("Empty response from HeadTTS"));
-
-    return;
-  }
-
-  AudioChunk chunk;
-  QString parseError;
-
-  if (!parseHeadTtsResponse(payload, speakerId, chunk, parseError)) {
-    reply->deleteLater();
-
-    emit errorOccurred(
-        QStringLiteral("HeadTTS response could not be parsed: %1")
-            .arg(parseError));
-
-    return;
-  }
-
-  {
-    QMutexLocker locker(&m_queueMutex);
-
-    m_audioQueue.enqueue(chunk);
-  }
-
-  emit sentenceQueued(speakerId);
-  emit chunkReady(chunk);
-
-  reply->deleteLater();
-
-  if (!m_isPlaying)
-    playNextInQueue();
-}
-
-bool TtsManager::parseHeadTtsResponse(const QByteArray &payload,
-                                      int speakerId,
-                                      AudioChunk &out,
-                                      QString &error) {
-  QJsonParseError parseError;
-
-  const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
-
-  if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
-    error = parseError.errorString();
-    return false;
-  }
-
-  const QJsonObject object = doc.object();
-
-  const QString audioB64 = object.value(QStringLiteral("audio")).toString();
-
-  if (audioB64.isEmpty()) {
-    error = QStringLiteral("missing 'audio' field");
-    return false;
-  }
-
-  const QByteArray audio = QByteArray::fromBase64(audioB64.toUtf8());
-
-  if (audio.isEmpty()) {
-    error = QStringLiteral("audio decoded to zero bytes");
-    return false;
-  }
-
-  out.data = audio;
-  out.sampleRate = 24000;
-  out.speakerId = speakerId;
-  out.timestamp = QDateTime::currentMSecsSinceEpoch();
-
-  const QJsonArray visemeArray =
-      object.value(QStringLiteral("visemes")).toArray();
-  const QJsonArray vtimeArray =
-      object.value(QStringLiteral("vtimes")).toArray();
-  const QJsonArray vdurationArray =
-      object.value(QStringLiteral("vdurations")).toArray();
-
-  const int count =
-      qMin(visemeArray.size(), qMin(vtimeArray.size(), vdurationArray.size()));
-
-  QStringList visemes;
-  QVector<int> vtimes;
-  QVector<int> vdurations;
-
-  visemes.reserve(count);
-  vtimes.reserve(count);
-  vdurations.reserve(count);
-
-  for (int i = 0; i < count; ++i) {
-    visemes.append(visemeArray.at(i).toString());
-    vtimes.append(vtimeArray.at(i).toInt());
-    vdurations.append(vdurationArray.at(i).toInt());
-  }
-
-  out.visemes = VisemeMap::buildTimeline(visemes, vtimes, vdurations);
-
-  return true;
-}
 
 void TtsManager::playNextInQueue() {
   if (!m_enabled)
@@ -537,15 +542,33 @@ void TtsManager::playNextInQueue() {
 
   if (device.isNull()) {
     emit errorOccurred(QStringLiteral("No audio output device available."));
-
     return;
   }
 
-  QAudioFormat format;
+  const QAudioFormat preferred = device.preferredFormat();
 
-  format.setSampleRate(chunk.sampleRate);
-  format.setChannelCount(1);
-  format.setSampleFormat(QAudioFormat::Int16);
+  int sinkRate = preferred.sampleRate();
+
+  if (sinkRate <= 0) {
+    sinkRate = chunk.sampleRate;
+  }
+
+  QAudioFormat actual;
+  actual.setSampleRate(sinkRate);
+  actual.setChannelCount(1);
+  actual.setSampleFormat(QAudioFormat::Int16);
+
+  if (!device.isFormatSupported(actual)) {
+    const QAudioFormat fallback = device.preferredFormat();
+
+    actual = fallback;
+    actual.setChannelCount(1);
+    actual.setSampleFormat(QAudioFormat::Int16);
+
+    qWarning() << "[TTS] Mono Int16 at" << sinkRate
+               << "Hz is not supported; using"
+               << actual.sampleRate() << "Hz";
+  }
 
   cleanupAudioSink();
 
@@ -559,12 +582,11 @@ void TtsManager::playNextInQueue() {
 
     if (!m_audioBuffer.open(QIODevice::ReadOnly)) {
       emit errorOccurred(QStringLiteral("Failed to open TTS audio buffer."));
-
       return;
     }
   }
 
-  m_audioSink = std::make_unique<QAudioSink>(device, format);
+  m_audioSink = std::make_unique<QAudioSink>(device, actual);
 
   connect(m_audioSink.get(), &QAudioSink::stateChanged, this,
           &TtsManager::onAudioStateChanged, Qt::QueuedConnection);
@@ -573,6 +595,7 @@ void TtsManager::playNextInQueue() {
   m_playbackCompletionPending = true;
 
   qDebug() << "[TTS] Playing chunk:" << chunk.data.size() << "bytes"
+           << "rate:" << actual.sampleRate()
            << "visemes:" << chunk.visemes.size();
 
   m_audioSink->start(&m_audioBuffer);
@@ -581,8 +604,6 @@ void TtsManager::playNextInQueue() {
 }
 
 void TtsManager::onAudioStateChanged(QAudio::State state) {
-  qDebug() << "[TTS] Audio state changed:" << state;
-
   if (!m_audioSink)
     return;
 
@@ -597,21 +618,12 @@ void TtsManager::onAudioStateChanged(QAudio::State state) {
 
   if (state == QAudio::StoppedState) {
     if (m_audioSink->error() != QAudio::NoError) {
-      const QAudio::Error error = m_audioSink->error();
-
-      qWarning() << "[TTS] Audio error:" << error;
+      qWarning() << "[TTS] Audio error:" << m_audioSink->error();
 
       m_playbackCompletionPending = false;
       m_isPlaying = false;
 
       cleanupAudioSink();
-
-      {
-        QMutexLocker locker(&m_audioBufferMutex);
-
-        if (m_audioBuffer.isOpen())
-          m_audioBuffer.close();
-      }
 
       emit errorOccurred(QStringLiteral("Audio playback error."));
     }
@@ -653,23 +665,14 @@ void TtsManager::cleanupAudioSink() {
 }
 
 void TtsManager::stopAndClear() {
-  ++m_generation;
+  qDebug() << "[TTS] stopAndClear";
 
-  qDebug() << "[TTS] stopAndClear:"
-           << "generation=" << m_generation;
-
-  if (m_currentReply) {
-    QNetworkReply *reply = m_currentReply;
-
-    m_currentReply = nullptr;
-
-    reply->abort();
-    reply->deleteLater();
-  }
+  m_synthesisInFlight = false;
+  m_awaitingBinary = false;
+  m_pendingChunk = AudioChunk();
 
   {
     QMutexLocker locker(&m_queueMutex);
-
     m_audioQueue.clear();
   }
 
@@ -691,45 +694,5 @@ void TtsManager::stopAndClear() {
 
 int TtsManager::queueSize() const {
   QMutexLocker locker(&m_queueMutex);
-
   return m_audioQueue.size();
-}
-
-void TtsManager::checkServerHealth() {
-  const QUrl healthUrl =
-      m_serverUrl.resolved(QUrl(QStringLiteral("/health")));
-
-  QNetworkRequest request{healthUrl};
-
-  QNetworkReply *reply = m_networkManager->get(request);
-
-  connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-    if (reply->error() == QNetworkReply::NoError) {
-      const int status =
-          reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-
-      if (status == 200) {
-        m_healthCheckTimer->stop();
-
-        qDebug() << "[TTS] HeadTTS is ready.";
-
-        emit serverReady();
-
-        reply->deleteLater();
-
-        return;
-      }
-    }
-
-    ++m_healthAttempts;
-
-    if (m_healthAttempts >= MAX_HEALTH_ATTEMPTS) {
-      m_healthCheckTimer->stop();
-
-      emit errorOccurred(
-          QStringLiteral("HeadTTS did not become ready within timeout."));
-    }
-
-    reply->deleteLater();
-  });
 }
