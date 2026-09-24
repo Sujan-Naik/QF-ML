@@ -78,16 +78,11 @@ QByteArray pitchShift(const QByteArray &input, int sampleRate,
     return input;
   }
 
-  // Clamp to one octave either way; beyond that the artefact is worse
-  // than the effect.
   semitones = qBound(-12.0, semitones, 12.0);
 
   const double ratio = std::pow(2.0, semitones / 12.0);
   const int shiftedRate = qRound(sampleRate * ratio);
 
-  // Build the filter graph. asetrate changes the declared rate, which
-  // raises pitch; aresample returns to the original rate, which
-  // restores duration.
   const QString filterDesc =
       QStringLiteral("asetrate=%1,aresample=%2")
           .arg(shiftedRate)
@@ -105,7 +100,6 @@ QByteArray pitchShift(const QByteArray &input, int sampleRate,
     return input;
   }
 
-  // abuffer input descriptor. fltp is required by the filter chain.
   const QString srcArgs = QStringLiteral(
       "time_base=1/%1:sample_rate=%1:sample_fmt=fltp:channel_layout=mono")
       .arg(sampleRate);
@@ -155,7 +149,6 @@ QByteArray pitchShift(const QByteArray &input, int sampleRate,
     return input;
   }
 
-  // Convert the Int16 input to a float planar frame.
   const int srcSamples = input.size() / static_cast<int>(sizeof(int16_t));
   const auto *src = reinterpret_cast<const int16_t *>(input.constData());
 
@@ -185,7 +178,6 @@ QByteArray pitchShift(const QByteArray &input, int sampleRate,
 
   av_frame_free(&frame);
 
-  // Pull frames from the sink and append them.
   QByteArray out;
 
   while (true) {
@@ -243,6 +235,11 @@ TtsManager::TtsManager(QObject *parent)
 
   connect(&m_socket, &QWebSocket::binaryMessageReceived, this,
           &TtsManager::onBinaryMessageReceived);
+
+  m_reconnectTimer = new QTimer(this);
+  m_reconnectTimer->setInterval(m_reconnectIntervalMs);
+  connect(m_reconnectTimer, &QTimer::timeout, this,
+          &TtsManager::onReconnectTick);
 }
 
 TtsManager::~TtsManager() {
@@ -471,6 +468,7 @@ bool TtsManager::initialize(const QString &serverUrl, bool autoStart) {
     return false;
   }
 
+  m_serverUrl = url;
   m_initialized = true;
 
   qDebug() << "[TTS] Using HeadTTS server:" << url.toString()
@@ -485,12 +483,72 @@ bool TtsManager::initialize(const QString &serverUrl, bool autoStart) {
   return true;
 }
 
+void TtsManager::scheduleReconnect() {
+  if (!m_initialized) {
+    return;
+  }
+
+  if (m_reconnectTimer && !m_reconnectTimer->isActive()) {
+    qDebug() << "[TTS] Scheduling reconnect in"
+             << m_reconnectIntervalMs << "ms.";
+
+    m_reconnectTimer->start();
+  }
+}
+
+void TtsManager::onReconnectTick() {
+  if (m_socket.state() == QAbstractSocket::ConnectedState) {
+    if (m_reconnectTimer) {
+      m_reconnectTimer->stop();
+    }
+    return;
+  }
+
+  if (m_socket.state() == QAbstractSocket::ConnectingState) {
+    return;
+  }
+
+  qDebug() << "[TTS] Reconnect attempt to" << m_serverUrl.toString();
+
+  m_socket.open(m_serverUrl);
+}
+
+void TtsManager::flushPending() {
+  if (m_pendingSentences.isEmpty()) {
+    return;
+  }
+
+  if (m_socket.state() != QAbstractSocket::ConnectedState) {
+    return;
+  }
+
+  qDebug() << "[TTS] Flushing" << m_pendingSentences.size()
+           << "pending sentences.";
+
+  while (!m_pendingSentences.isEmpty()) {
+    if (m_synthesisInFlight) {
+      // requestSynthesis will only accept one at a time. Push the
+      // rest back and wait for the next flush.
+      break;
+    }
+
+    const PendingSentence p = m_pendingSentences.dequeue();
+    requestSynthesis(p.text, p.speakerId);
+  }
+}
+
 void TtsManager::onSocketConnected() {
   qDebug() << "[TTS] WebSocket connected.";
+
+  if (m_reconnectTimer) {
+    m_reconnectTimer->stop();
+  }
 
   m_setupSent = false;
 
   emit serverReady();
+
+  flushPending();
 }
 
 void TtsManager::onSocketDisconnected() {
@@ -499,6 +557,8 @@ void TtsManager::onSocketDisconnected() {
   m_setupSent = false;
   m_synthesisInFlight = false;
   m_awaitingBinary = false;
+
+  scheduleReconnect();
 }
 
 void TtsManager::onSocketError(QAbstractSocket::SocketError error) {
@@ -506,6 +566,8 @@ void TtsManager::onSocketError(QAbstractSocket::SocketError error) {
 
   emit errorOccurred(
       QStringLiteral("HeadTTS WebSocket error: %1").arg(error));
+
+  scheduleReconnect();
 }
 
 void TtsManager::sendSetupMessage() {
@@ -521,7 +583,7 @@ void TtsManager::sendSetupMessage() {
   QJsonObject data;
   data["voice"] = m_voice;
   data["language"] = language;
-  data["speed"] = 1;
+  data["speed"] = 1.1;
   data["audioEncoding"] = audioEncoding;
 
   QJsonObject message;
@@ -549,19 +611,67 @@ void TtsManager::enqueueSentence(const QString &sentence, int speakerId) {
     return;
   }
 
+  if (m_socket.state() != QAbstractSocket::ConnectedState) {
+    qDebug() << "[TTS] Socket not connected; queueing sentence.";
+
+    if (m_pendingSentences.size() >= kMaxPendingSentences) {
+      const PendingSentence dropped = m_pendingSentences.dequeue();
+      qWarning() << "[TTS] Pending queue full, dropping oldest sentence:"
+                 << dropped.text.left(40);
+    }
+
+    PendingSentence p;
+    p.text = cleaned;
+    p.speakerId = speakerId;
+
+    m_pendingSentences.enqueue(p);
+
+    scheduleReconnect();
+
+    return;
+  }
+
   requestSynthesis(cleaned, speakerId);
 }
 
 void TtsManager::requestSynthesis(const QString &text, int speakerId) {
   if (m_synthesisInFlight) {
-    qWarning() << "[TTS] Synthesis already in flight;"
-               << "ignoring overlapping sentence.";
+    // Queue it. It will be flushed when the current synthesis ends
+    // and the socket is idle, or when the current chunk finishes.
+    qDebug() << "[TTS] Synthesis already in flight; queueing sentence.";
+
+    if (m_pendingSentences.size() >= kMaxPendingSentences) {
+      const PendingSentence dropped = m_pendingSentences.dequeue();
+      qWarning() << "[TTS] Pending queue full, dropping oldest sentence:"
+                 << dropped.text.left(40);
+    }
+
+    PendingSentence p;
+    p.text = text;
+    p.speakerId = speakerId;
+
+    m_pendingSentences.enqueue(p);
+
     return;
   }
 
   if (m_socket.state() != QAbstractSocket::ConnectedState) {
-    qWarning() << "[TTS] Socket not connected; dropping sentence.";
-    emit errorOccurred(QStringLiteral("HeadTTS socket is not connected."));
+    qWarning() << "[TTS] Socket not connected; queueing sentence.";
+
+    if (m_pendingSentences.size() >= kMaxPendingSentences) {
+      const PendingSentence dropped = m_pendingSentences.dequeue();
+      qWarning() << "[TTS] Pending queue full, dropping oldest sentence:"
+                 << dropped.text.left(40);
+    }
+
+    PendingSentence p;
+    p.text = text;
+    p.speakerId = speakerId;
+
+    m_pendingSentences.enqueue(p);
+
+    scheduleReconnect();
+
     return;
   }
 
@@ -615,6 +725,8 @@ void TtsManager::onTextMessageReceived(const QString &message) {
     m_awaitingBinary = false;
 
     emit errorOccurred(error);
+
+    flushPending();
 
     return;
   }
@@ -679,6 +791,7 @@ void TtsManager::onBinaryMessageReceived(const QByteArray &data) {
 
   if (data.isEmpty()) {
     qWarning() << "[TTS] Empty binary audio message.";
+    flushPending();
     return;
   }
 
@@ -701,6 +814,8 @@ void TtsManager::onBinaryMessageReceived(const QByteArray &data) {
 
   if (!m_isPlaying)
     playNextInQueue();
+
+  flushPending();
 }
 
 void TtsManager::setEnabled(bool enabled) {
@@ -784,12 +899,8 @@ void TtsManager::playNextInQueue() {
                << actual.sampleRate() << "Hz";
   }
 
-  // Pitch shift if configured. The chunk rate is unchanged by this
-  // operation; only the frequency content moves.
-  chunk.data = pitchShift(chunk.data, chunk.sampleRate, 4.0);
+  chunk.data = pitchShift(chunk.data, chunk.sampleRate, 1);
 
-  // Resample the chunk to the sink rate if they differ. Without this,
-  // a 24 kHz chunk played on a 48 kHz sink runs at double speed.
   if (actual.sampleRate() != chunk.sampleRate) {
     qDebug() << "[TTS] Resampling from" << chunk.sampleRate
              << "Hz to" << actual.sampleRate() << "Hz.";
@@ -831,96 +942,8 @@ void TtsManager::playNextInQueue() {
 
   emit chunkPlaybackStarted(chunk);
 }
+
 void TtsManager::onAudioStateChanged(QAudio::State state) {
   if (!m_audioSink)
     return;
 
-  if (state == QAudio::IdleState) {
-    if (!m_playbackCompletionPending)
-      return;
-
-    finishCurrentPlayback();
-
-    return;
-  }
-
-  if (state == QAudio::StoppedState) {
-    if (m_audioSink->error() != QAudio::NoError) {
-      qWarning() << "[TTS] Audio error:" << m_audioSink->error();
-
-      m_playbackCompletionPending = false;
-      m_isPlaying = false;
-
-      cleanupAudioSink();
-
-      emit errorOccurred(QStringLiteral("Audio playback error."));
-    }
-  }
-}
-
-void TtsManager::finishCurrentPlayback() {
-  if (!m_playbackCompletionPending)
-    return;
-
-  m_playbackCompletionPending = false;
-
-  if (m_audioSink)
-    m_audioSink->stop();
-
-  cleanupAudioSink();
-
-  {
-    QMutexLocker locker(&m_audioBufferMutex);
-
-    if (m_audioBuffer.isOpen())
-      m_audioBuffer.close();
-
-    m_audioBuffer.setData(QByteArray());
-  }
-
-  m_isPlaying = false;
-
-  emit sentenceFinished();
-}
-
-void TtsManager::cleanupAudioSink() {
-  if (!m_audioSink)
-    return;
-
-  m_audioSink->disconnect();
-  m_audioSink->stop();
-  m_audioSink.reset();
-}
-
-void TtsManager::stopAndClear() {
-  qDebug() << "[TTS] stopAndClear";
-
-  m_synthesisInFlight = false;
-  m_awaitingBinary = false;
-  m_pendingChunk = AudioChunk();
-
-  {
-    QMutexLocker locker(&m_queueMutex);
-    m_audioQueue.clear();
-  }
-
-  m_playbackCompletionPending = false;
-
-  cleanupAudioSink();
-
-  {
-    QMutexLocker locker(&m_audioBufferMutex);
-
-    if (m_audioBuffer.isOpen())
-      m_audioBuffer.close();
-
-    m_audioBuffer.setData(QByteArray());
-  }
-
-  m_isPlaying = false;
-}
-
-int TtsManager::queueSize() const {
-  QMutexLocker locker(&m_queueMutex);
-  return m_audioQueue.size();
-}

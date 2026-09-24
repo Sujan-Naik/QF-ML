@@ -44,6 +44,12 @@
 //   the binary always follows the audio text message for the same
 //   request. Interleaving only happens if more than one synthesis is
 //   in flight, which TtsManager prevents.
+//
+// If the socket drops, TtsManager reconnects on a short timer and
+// keeps trying. Text handed to enqueueSentence while the socket is
+// down is queued rather than dropped, and flushed once the socket
+// comes back. The queue is bounded; the oldest entries are dropped
+// when it is full.
 class TtsManager : public QObject {
   Q_OBJECT
 
@@ -111,6 +117,8 @@ private slots:
 
   void onProcessError(QProcess::ProcessError error);
 
+  void onReconnectTick();
+
 private:
   void sendSetupMessage();
 
@@ -123,6 +131,11 @@ private:
   void startHeadTts();
   void stopHeadTts();
 
+  void scheduleReconnect();
+
+  // Flush pending sentences once the socket is connected.
+  void flushPending();
+
   static QStringList defaultVoices();
 
   static QString resolveNodeBinary();
@@ -131,6 +144,8 @@ private:
 
 private:
   QWebSocket m_socket;
+
+  QUrl m_serverUrl;
 
   // Outstanding request bookkeeping. Only one synthesis is in flight
   // at a time, so a single set of fields is enough.
@@ -155,6 +170,22 @@ private:
   QQueue<AudioChunk> m_audioQueue;
 
   mutable QMutex m_queueMutex;
+
+  // Sentences that arrived while the socket was down. Flushed on
+  // reconnect. Bounded; the oldest is dropped when full.
+  struct PendingSentence {
+    QString text;
+    int speakerId = 0;
+  };
+
+  QQueue<PendingSentence> m_pendingSentences;
+
+  static constexpr int kMaxPendingSentences = 8;
+
+  // Reconnect. Retries forever on a short interval while the socket
+  // is not connected.
+  QTimer *m_reconnectTimer = nullptr;
+  int m_reconnectIntervalMs = 2000;
 
   bool m_enabled = false;
   bool m_initialized = false;
