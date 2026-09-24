@@ -1,23 +1,105 @@
-#include "../../include/voice/VisemeMap.h"
+#include "voice/VisemeMap.h"
 
-QVector<Viseme> VisemeMap::buildTimeline(const QStringList &visemes,
-                                         const QVector<int> &vtimes,
-                                         const QVector<int> &vdurations) {
-  QVector<Viseme> out;
+#include <QDebug>
 
-  const int count =
-      qMin(visemes.size(), qMin(vtimes.size(), vdurations.size()));
+namespace {
 
-  out.reserve(count);
+struct Spec {
+  const char *viseme;
+  const char *shape;
+  float weight;
+};
 
-  for (int i = 0; i < count; ++i) {
-    Viseme v;
-    v.startMs = vtimes.at(i);
-    v.endMs = vtimes.at(i) + vdurations.at(i);
-    v.shape = visemes.at(i);
+// The mapping table. Every entry maps one Oculus viseme to one
+// Reallusion shape at a given weight. A viseme with several entries
+// uses several shapes at once. Weights are tuned by ear and by eye;
+// the vowels carry the visible motion.
+//
+// sil is deliberately absent. The map returns an empty vector for it
+// and the caller zeroes all weights.
+constexpr Spec kSpec[] = {
+    {"PP", "Mouth_Close", 0.85f},
 
-    out.append(v);
+    {"FF", "Mouth_Close", 0.45f},
+
+    {"TH", "V_Dental_Lip", 0.85f},
+
+    {"DD", "Mouth_Close", 0.30f},
+    {"DD", "Jaw_Open", 0.15f},
+
+    {"kk", "Mouth_Close", 0.25f},
+    {"kk", "Jaw_Open", 0.10f},
+
+    {"CH", "Mouth_Close", 0.20f},
+    {"CH", "Jaw_Open", 0.25f},
+
+    {"SS", "Mouth_Close", 0.20f},
+    {"SS", "V_Wide", 0.15f},
+
+    {"nn", "Mouth_Close", 0.35f},
+    {"nn", "Jaw_Open", 0.10f},
+
+    {"RR", "V_Tight", 0.50f},
+    {"RR", "Mouth_Close", 0.15f},
+
+    {"aa", "V_Open", 0.90f},
+    {"aa", "Jaw_Open", 0.55f},
+
+    {"E", "V_Wide", 0.60f},
+    {"E", "Jaw_Open", 0.30f},
+
+    {"I", "V_Wide", 0.80f},
+    {"I", "Jaw_Open", 0.15f},
+
+    {"O", "V_Tight_O", 0.90f},
+    {"O", "Jaw_Open", 0.25f},
+
+    {"U", "V_Tight_O", 0.70f},
+    {"U", "Mouth_Close", 0.35f},
+};
+
+} // namespace
+
+void VisemeMap::build(const QHash<QString, int> &nameToIndex) {
+  m_table.clear();
+  m_targetCount = nameToIndex.size();
+
+  int applied = 0;
+  int skipped = 0;
+
+  for (const Spec &spec : kSpec) {
+    const QString viseme = QString::fromLatin1(spec.viseme);
+    const QString shape = QString::fromLatin1(spec.shape);
+
+    const auto it = nameToIndex.constFind(shape);
+
+    if (it == nameToIndex.constEnd()) {
+      qWarning() << "[VisemeMap] Shape not present on the face mesh:"
+                 << shape << "for viseme" << viseme;
+      ++skipped;
+      continue;
+    }
+
+    Weight w;
+    w.morphIndex = it.value();
+    w.weight = spec.weight;
+
+    m_table[viseme].append(w);
+    ++applied;
   }
 
-  return out;
+  qDebug() << "[VisemeMap] Built:" << m_table.size() << "visemes,"
+           << applied << "shape bindings," << skipped << "skipped,"
+           << m_targetCount << "targets.";
+}
+
+QVector<VisemeMap::Weight> VisemeMap::weightsFor(
+    const QString &viseme) const {
+  return m_table.value(viseme);
+}
+
+QStringList VisemeMap::knownVisemes() const {
+  QStringList names = m_table.keys();
+  names.sort();
+  return names;
 }
