@@ -947,3 +947,101 @@ void TtsManager::onAudioStateChanged(QAudio::State state) {
   if (!m_audioSink)
     return;
 
+  if (state == QAudio::IdleState) {
+    if (!m_playbackCompletionPending)
+      return;
+
+    finishCurrentPlayback();
+
+    return;
+  }
+
+  if (state == QAudio::StoppedState) {
+    if (m_audioSink->error() != QAudio::NoError) {
+      qWarning() << "[TTS] Audio error:" << m_audioSink->error();
+
+      m_playbackCompletionPending = false;
+      m_isPlaying = false;
+
+      cleanupAudioSink();
+
+      emit errorOccurred(QStringLiteral("Audio playback error."));
+    }
+  }
+}
+
+void TtsManager::finishCurrentPlayback() {
+  if (!m_playbackCompletionPending)
+    return;
+
+  m_playbackCompletionPending = false;
+
+  if (m_audioSink)
+    m_audioSink->stop();
+
+  cleanupAudioSink();
+
+  {
+    QMutexLocker locker(&m_audioBufferMutex);
+
+    if (m_audioBuffer.isOpen())
+      m_audioBuffer.close();
+
+    m_audioBuffer.setData(QByteArray());
+  }
+
+  m_isPlaying = false;
+
+  emit sentenceFinished();
+
+  // A sentence finished. If there is another chunk queued, play it.
+  // Otherwise, if any sentences were held back while this one was
+  // synthesising or playing, request one now.
+  if (m_synthesisInFlight == false) {
+    flushPending();
+  }
+}
+
+void TtsManager::cleanupAudioSink() {
+  if (!m_audioSink)
+    return;
+
+  m_audioSink->disconnect();
+  m_audioSink->stop();
+  m_audioSink.reset();
+}
+
+void TtsManager::stopAndClear() {
+  qDebug() << "[TTS] stopAndClear";
+
+  m_synthesisInFlight = false;
+  m_awaitingBinary = false;
+  m_pendingChunk = AudioChunk();
+
+  {
+    QMutexLocker locker(&m_queueMutex);
+    m_audioQueue.clear();
+  }
+
+  m_pendingSentences.clear();
+
+  m_playbackCompletionPending = false;
+
+  cleanupAudioSink();
+
+  {
+    QMutexLocker locker(&m_audioBufferMutex);
+
+    if (m_audioBuffer.isOpen())
+      m_audioBuffer.close();
+
+    m_audioBuffer.setData(QByteArray());
+  }
+
+  m_isPlaying = false;
+}
+
+int TtsManager::queueSize() const {
+  QMutexLocker locker(&m_queueMutex);
+  return m_audioQueue.size();
+}
