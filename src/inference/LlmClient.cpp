@@ -408,11 +408,20 @@ void LlmClient::dispatchSseMessage(const Token &token, ReplyState &state,
 
     state.requestFailed = true;
 
-    emit requestError(token,
-                      message.isEmpty()
-                          ? QStringLiteral("Provider reported an error "
-                                           "mid-stream.")
-                          : message);
+    const QString errorText =
+        message.isEmpty()
+            ? QStringLiteral("Provider reported an error mid-stream.")
+            : message;
+
+    // Deliver the error after this function returns so that no
+    // consumer can re-enter LlmClient and invalidate `state` (which
+    // is a reference into m_states) before consumeStreamBuffer is
+    // done with it.
+    QMetaObject::invokeMethod(
+        this,
+        [this, token, errorText]() { emit requestError(token, errorText); },
+        Qt::QueuedConnection);
+
     return;
   }
 
@@ -437,7 +446,14 @@ void LlmClient::dispatchSseMessage(const Token &token, ReplyState &state,
 
   if (!content.isEmpty()) {
     state.receivedAnyDelta = true;
-    emit deltaReceived(token, content);
+
+    // Queued so that deltaReceived consumers run after
+    // consumeStreamBuffer has finished iterating and released its
+    // reference into m_states.
+    QMetaObject::invokeMethod(
+        this,
+        [this, token, content]() { emit deltaReceived(token, content); },
+        Qt::QueuedConnection);
   }
 
   const QJsonValue toolCallsValue =
@@ -448,6 +464,7 @@ void LlmClient::dispatchSseMessage(const Token &token, ReplyState &state,
     accumulateToolCallDelta(state, toolCallsValue.toArray());
   }
 }
+
 
 QString LlmClient::buildReplyError(QNetworkReply *reply) const {
   if (!reply)
