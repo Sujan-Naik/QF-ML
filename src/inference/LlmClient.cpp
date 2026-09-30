@@ -5,9 +5,67 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QMetaObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
+
+namespace {
+
+// True when `segment`, taken as an SSE data payload, looks like the
+// start of a new SSE message rather than a continuation line of the
+// current one. A new message is either the literal [DONE] sentinel or
+// a single JSON value (object or array). A continuation line of a
+// multi-line JSON payload does not start with '{' or '[' — it starts
+// with a key, a string, or a scalar — so this check splits
+// "{...}\n[DONE]" and "{...}\n{...}" correctly while leaving a genuine
+// multi-line JSON payload intact.
+bool looksLikeNewSsePayload(const QByteArray &segment) {
+  const QByteArray trimmed = segment.trimmed();
+
+  if (trimmed.isEmpty())
+    return false;
+
+  if (trimmed == QByteArrayLiteral("[DONE]"))
+    return true;
+
+  const char first = trimmed.at(0);
+
+  return first == '{' || first == '[';
+}
+
+// Split `buffer` into one or more SSE payloads at points where a
+// new payload begins. Returns the segments in order. An empty buffer
+// returns an empty list.
+QList<QByteArray> splitSsePayloads(const QByteArray &buffer) {
+  QList<QByteArray> result;
+
+  if (buffer.isEmpty())
+    return result;
+
+  const QList<QByteArray> lines = buffer.split('\n');
+
+  QByteArray current;
+
+  for (const QByteArray &line : lines) {
+    if (looksLikeNewSsePayload(line) && !current.isEmpty()) {
+      result.append(current);
+      current.clear();
+    }
+
+    if (!current.isEmpty())
+      current.append('\n');
+
+    current.append(line);
+  }
+
+  if (!current.isEmpty())
+    result.append(current);
+
+  return result;
+}
+
+} // namespace
 
 LlmClient::LlmClient(QNetworkAccessManager *networkManager, QObject *parent)
     : QObject(parent), m_networkManager(networkManager) {}
@@ -215,14 +273,17 @@ void LlmClient::consumeStreamBuffer(ReplyState &state) {
 }
 
 void LlmClient::flushStreamBuffer(ReplyState &state, const Token &token) {
-  // A well-formed SSE stream ends with a newline, so consumeStreamBuffer
-  // normally leaves nothing behind. If the buffer is non-empty here, the
-  // stream ended mid-message. Split out any complete "data:" fields that
-  // are present (they can be present if the final chunk contained more
-  // than one field and no trailing newline), dispatch them, and then
-  // treat whatever remains as a single final data field so the last
-  // content delta is not lost.
-  while (!state.streamBuffer.isEmpty()) {
+  // The SSE grammar terminates a message with a blank line, so a
+  // well-formed stream always ends with one. If we are here with
+  // anything left in the buffer, the stream ended without a final
+  // blank line, and the last one or two SSE messages — a content
+  // chunk and the [DONE] sentinel, typically — are sitting in
+  // state.currentSseData joined by a newline.
+  //
+  // Consume any complete lines still in the raw buffer. Each one is
+  // fed through processSseLine, which accumulates data: fields into
+  // currentSseData exactly as if a blank line had arrived.
+  while (true) {
     const int newlineIndex = state.streamBuffer.indexOf('\n');
 
     if (newlineIndex == -1)
@@ -240,6 +301,10 @@ void LlmClient::flushStreamBuffer(ReplyState &state, const Token &token) {
     processSseLine(state, line);
   }
 
+  // If a bare JSON payload remains in the raw buffer with no data:
+  // prefix and no trailing newline, feed it through the normal parser
+  // as a synthetic data: line so it lands in currentSseData with
+  // everything else.
   if (!state.streamBuffer.isEmpty()) {
     QByteArray remaining = state.streamBuffer;
 
@@ -248,19 +313,29 @@ void LlmClient::flushStreamBuffer(ReplyState &state, const Token &token) {
     if (remaining.endsWith('\r'))
       remaining.chop(1);
 
-    // If the remainder is a single "data:" field, feed it through the
-    // normal parser so its JSON is dispatched. If it is a bare JSON
-    // payload without the SSE prefix, dispatch it directly.
     if (remaining.startsWith("data:")) {
       processSseLine(state, remaining);
     } else if (!remaining.trimmed().isEmpty()) {
+      // Bare payload, no SSE prefix. Dispatch directly.
       dispatchSseMessage(token, state, remaining);
     }
   }
 
+  // Whatever is in currentSseData now may hold one SSE message
+  // (multi-line data joined by \n, dispatched as a unit) or two or
+  // more messages that were never separated by a blank line. Split
+  // only at points where a new SSE payload begins; a continuation
+  // line of a genuine multi-line JSON payload does not begin with
+  // '{', '[' or the [DONE] sentinel, so it is left intact.
   if (!state.currentSseData.isEmpty()) {
-    dispatchSseMessage(token, state, state.currentSseData);
+    const QList<QByteArray> payloads = splitSsePayloads(state.currentSseData);
+
     state.currentSseData.clear();
+
+    for (const QByteArray &payload : payloads) {
+      if (!payload.trimmed().isEmpty())
+        dispatchSseMessage(token, state, payload);
+    }
   }
 }
 
@@ -465,7 +540,6 @@ void LlmClient::dispatchSseMessage(const Token &token, ReplyState &state,
   }
 }
 
-
 QString LlmClient::buildReplyError(QNetworkReply *reply) const {
   if (!reply)
     return QStringLiteral("LLM request failed.");
@@ -574,7 +648,14 @@ void LlmClient::onFinished() {
     return;
 
   if (statusCode > 0 && (statusCode < 200 || statusCode >= 300)) {
-    emit requestError(token, buildReplyError(reply));
+    const QString errorText = buildReplyError(reply);
+
+    // Queued so it lands after any delta that dispatchSseMessage
+    // already posted to the event loop for this token.
+    QMetaObject::invokeMethod(
+        this,
+        [this, token, errorText]() { emit requestError(token, errorText); },
+        Qt::QueuedConnection);
     return;
   }
 
@@ -586,25 +667,34 @@ void LlmClient::onFinished() {
     flushStreamBuffer(state, token);
 
     if (state.requestFailed) {
-      // dispatchSseMessage already emitted requestError.
+      // dispatchSseMessage already queued a requestError.
       return;
     }
 
     const QJsonArray toolCalls = finaliseToolCalls(state);
 
     if (!toolCalls.isEmpty()) {
-      emit toolCallsReceived(token, toolCalls);
+      QMetaObject::invokeMethod(
+          this,
+          [this, token, toolCalls]() {
+            emit toolCallsReceived(token, toolCalls);
+          },
+          Qt::QueuedConnection);
       return;
     }
 
     // The stream must have produced content. If it did not, the
     // provider closed the connection without sending anything.
     if (!state.receivedAnyDelta) {
-      emit requestError(
-          token,
+      const QString errorText =
           QStringLiteral("The LLM provider closed the stream without "
                          "sending any content. This is usually a "
-                         "transient server-side failure. Retry."));
+                         "transient server-side failure. Retry.");
+
+      QMetaObject::invokeMethod(
+          this,
+          [this, token, errorText]() { emit requestError(token, errorText); },
+          Qt::QueuedConnection);
       return;
     }
 
@@ -614,18 +704,29 @@ void LlmClient::onFinished() {
     // an error rather than a clean finish, because the accumulated
     // content is incomplete.
     if (!state.sawDoneSentinel) {
-      emit requestError(
-          token,
+      const QString errorText =
           QStringLiteral("The LLM stream ended without a [DONE] sentinel. "
-                         "This means the response was truncated. Retry."));
+                         "This means the response was truncated. Retry.");
+
+      QMetaObject::invokeMethod(
+          this,
+          [this, token, errorText]() { emit requestError(token, errorText); },
+          Qt::QueuedConnection);
       return;
     }
 
-    emit requestFinished(token);
+    QMetaObject::invokeMethod(
+        this, [this, token]() { emit requestFinished(token); },
+        Qt::QueuedConnection);
     return;
   }
 
-  emit requestError(token, buildReplyError(reply));
+  const QString errorText = buildReplyError(reply);
+
+  QMetaObject::invokeMethod(
+      this,
+      [this, token, errorText]() { emit requestError(token, errorText); },
+      Qt::QueuedConnection);
 }
 
 void LlmClient::onError(QNetworkReply::NetworkError error) {
