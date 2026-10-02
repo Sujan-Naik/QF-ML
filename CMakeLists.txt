@@ -81,7 +81,11 @@ set(NEMO_SPEECH_WITH_NORM OFF CACHE BOOL "" FORCE)
 set(NEMO_SPEECH_TTS_WITH_JA OFF CACHE BOOL "" FORCE)
 set(NEMO_SPEECH_TTS_WITH_ZH OFF CACHE BOOL "" FORCE)
 
-set(GGML_VULKAN ON CACHE BOOL "Enable ggml Vulkan backend" FORCE)
+if (APPLE)
+    set(GGML_VULKAN OFF CACHE BOOL "Enable ggml Vulkan backend" FORCE)
+else ()
+    set(GGML_VULKAN ON CACHE BOOL "Enable ggml Vulkan backend" FORCE)
+endif ()
 set(GGML_METAL OFF CACHE BOOL "Enable ggml Metal backend" FORCE)
 set(NEMO_SPEECH_GGML_PATCHED OFF CACHE BOOL "" FORCE)
 
