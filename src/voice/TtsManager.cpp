@@ -154,9 +154,14 @@ QByteArray pitchShift(const QByteArray &input, int sampleRate,
 
   AVFrame *frame = av_frame_alloc();
   frame->format = AV_SAMPLE_FMT_FLTP;
-  frame->channel_layout = AV_CH_LAYOUT_MONO;
   frame->sample_rate = sampleRate;
   frame->nb_samples = srcSamples;
+  #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+    av_channel_layout_default(&frame->ch_layout, 1);
+  #else
+    frame->channel_layout = AV_CH_LAYOUT_MONO;
+    frame->channels = 1;
+  #endif
 
   if (av_frame_get_buffer(frame, 0) < 0) {
     av_frame_free(&frame);
