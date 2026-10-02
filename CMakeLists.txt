@@ -888,7 +888,7 @@ else ()
 endif ()
 
 # =============================================================================
-# 4. OCR libraries
+# 4. OCR libraries and FFmpeg
 # =============================================================================
 
 find_package(PkgConfig QUIET)
@@ -897,6 +897,9 @@ if (PkgConfig_FOUND)
 
     pkg_check_modules(TESSERACT tesseract)
     pkg_check_modules(LEPTONICA lept)
+    pkg_check_modules(AVFILTER   libavfilter)
+    pkg_check_modules(AVFORMAT   libavformat)
+    pkg_check_modules(AVUTIL     libavutil)
 
 endif ()
 
@@ -911,6 +914,27 @@ if (NOT LEPTONICA_FOUND)
 
     find_library(LEPTONICA_LIBRARIES NAMES lept leptonica)
     find_path(LEPTONICA_INCLUDE_DIRS NAMES leptonica/allheaders.h)
+
+endif ()
+
+if (NOT AVFILTER_FOUND)
+
+    find_library(AVFILTER_LIBRARIES NAMES avfilter)
+    find_path(AVFILTER_INCLUDE_DIRS NAMES libavfilter/avfilter.h)
+
+endif ()
+
+if (NOT AVFORMAT_FOUND)
+
+    find_library(AVFORMAT_LIBRARIES NAMES avformat)
+    find_path(AVFORMAT_INCLUDE_DIRS NAMES libavformat/avformat.h)
+
+endif ()
+
+if (NOT AVUTIL_FOUND)
+
+    find_library(AVUTIL_LIBRARIES NAMES avutil)
+    find_path(AVUTIL_INCLUDE_DIRS NAMES libavutil/avutil.h)
 
 endif ()
 
@@ -973,6 +997,9 @@ target_include_directories(
 
         ${TESSERACT_INCLUDE_DIRS}
         ${LEPTONICA_INCLUDE_DIRS}
+        ${AVFILTER_INCLUDE_DIRS}
+        ${AVFORMAT_INCLUDE_DIRS}
+        ${AVUTIL_INCLUDE_DIRS}
 
         "${NEMO_SPEECH_SOURCE_DIR}/include"
 )
@@ -1021,9 +1048,9 @@ target_link_libraries(
         Qt6::Multimedia
         Qt6::TextToSpeech
         Qt6::WebSockets
-        avfilter
-        avformat
-        avutil
+        ${AVFILTER_LIBRARIES}
+        ${AVFORMAT_LIBRARIES}
+        ${AVUTIL_LIBRARIES}
 
         PRIVATE
 
