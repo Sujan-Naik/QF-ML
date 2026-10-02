@@ -9,6 +9,10 @@ if (POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif ()
 
+# ============================================================================
+# Qt
+# ============================================================================
+
 find_package(Qt6 REQUIRED COMPONENTS
         Core
         Gui
@@ -23,16 +27,6 @@ find_package(Qt6 REQUIRED COMPONENTS
 qt_standard_project_setup()
 
 include(FetchContent)
-
-# =============================================================================
-# 0. nvm Node discovery
-# =============================================================================
-
-file(
-        GLOB
-        NVM_NODE_BINS
-        "$ENV{HOME}/.nvm/versions/node/*/bin"
-)
 
 # =============================================================================
 # 1. NeMo-Speech.cpp
@@ -72,29 +66,40 @@ if (NOT EXISTS
 endif ()
 
 set(NEMO_SPEECH_BUILD_ASR ON CACHE BOOL "Build NeMo ASR" FORCE)
-set(NEMO_SPEECH_BUILD_DIAR OFF CACHE BOOL "Build standalone/ASR-integrated diarization" FORCE)
-set(NEMO_SPEECH_BUILD_TTS OFF CACHE BOOL "Build NeMo TTS" FORCE)
-set(NEMO_SPEECH_BUILD_NMT OFF CACHE BOOL "Build NeMo NMT" FORCE)
-set(NEMO_SPEECH_BUILD_CLI OFF CACHE BOOL "Build NeMo CLI" FORCE)
-set(NEMO_SPEECH_BUILD_MIC_CAPTURE OFF CACHE BOOL "Build microphone capture" FORCE)
-set(NEMO_SPEECH_BUILD_HTTP OFF CACHE BOOL "Build HTTP server" FORCE)
-set(NEMO_SPEECH_BUILD_GRPC OFF CACHE BOOL "Build gRPC" FORCE)
-set(NEMO_SPEECH_BUILD_TESTS OFF CACHE BOOL "Build tests" FORCE)
-set(NEMO_SPEECH_BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
-set(NEMO_SPEECH_BUILD_TOOLS OFF CACHE BOOL "Build developer tools" FORCE)
-set(NEMO_SPEECH_WITH_FLASHLIGHT OFF CACHE BOOL "Build Flashlight/KenLM decoder" FORCE)
-set(NEMO_SPEECH_WITH_NORM OFF CACHE BOOL "Build text normalization" FORCE)
+set(NEMO_SPEECH_BUILD_DIAR OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_TTS OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_NMT OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_MIC_CAPTURE OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_HTTP OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_GRPC OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_WITH_FLASHLIGHT OFF CACHE BOOL "" FORCE)
+set(NEMO_SPEECH_WITH_NORM OFF CACHE BOOL "" FORCE)
 set(NEMO_SPEECH_TTS_WITH_JA OFF CACHE BOOL "" FORCE)
 set(NEMO_SPEECH_TTS_WITH_ZH OFF CACHE BOOL "" FORCE)
 
 set(GGML_VULKAN ON CACHE BOOL "Enable ggml Vulkan backend" FORCE)
 set(GGML_METAL OFF CACHE BOOL "Enable ggml Metal backend" FORCE)
-set(NEMO_SPEECH_GGML_PATCHED OFF CACHE BOOL "Use patched NeMo ggml" FORCE)
+set(NEMO_SPEECH_GGML_PATCHED OFF CACHE BOOL "" FORCE)
 
 include_directories(
         BEFORE
         "${NEMO_SPEECH_SOURCE_DIR}/include"
 )
+
+# =============================================================================
+# 1A. Vulkan-Headers compatibility patch
+# =============================================================================
+#
+# Debian 12 ships Vulkan-Hpp headers predating VK_EXT_layer_settings.
+# The vendored ggml Vulkan backend uses vk::LayerSettingEXT unconditionally,
+# which fails to compile on those headers. The extension is optional, so when
+# the headers do not expose it, fall back to a plain vk::InstanceCreateInfo.
+# No-op once Vulkan-Hpp catches up.
+# =============================================================================
 
 set(
         NEMO_VULKAN_CPP
@@ -103,11 +108,7 @@ set(
 
 if (EXISTS "${NEMO_VULKAN_CPP}")
 
-    file(
-            READ
-            "${NEMO_VULKAN_CPP}"
-            NEMO_VULKAN_CONTENT
-    )
+    file(READ "${NEMO_VULKAN_CPP}" NEMO_VULKAN_CONTENT)
 
     if (NEMO_VULKAN_CONTENT MATCHES "vk::LayerSettingEXT")
 
@@ -135,11 +136,7 @@ if (EXISTS "${NEMO_VULKAN_CPP}")
                 "${NEMO_VULKAN_CONTENT}"
         )
 
-        file(
-                WRITE
-                "${NEMO_VULKAN_CPP}"
-                "${NEMO_VULKAN_CONTENT}"
-        )
+        file(WRITE "${NEMO_VULKAN_CPP}" "${NEMO_VULKAN_CONTENT}")
 
         message(STATUS "NeMo ggml Vulkan-Headers compatibility patch applied.")
 
@@ -223,13 +220,10 @@ endif ()
 
 FetchContent_Declare(
         onnxruntime_prebuilt
-        URL
-        "${ONNX_URL}"
+        URL "${ONNX_URL}"
 )
 
-FetchContent_MakeAvailable(
-        onnxruntime_prebuilt
-)
+FetchContent_MakeAvailable(onnxruntime_prebuilt)
 
 set(
         ONNXRUNTIME_INCLUDE_DIR
@@ -264,7 +258,8 @@ elseif (APPLE)
 else ()
 
     set(
-            ONNXRUNTIME_LIBRARY            "${onnxruntime_prebuilt_SOURCE_DIR}/lib/libonnxruntime.so"
+            ONNXRUNTIME_LIBRARY
+            "${onnxruntime_prebuilt_SOURCE_DIR}/lib/libonnxruntime.so"
     )
 
     file(
@@ -291,6 +286,10 @@ set_target_properties(
 
 # =============================================================================
 # 3. Shared QF data directory
+# =============================================================================
+#
+# Must match QFPaths::dataRoot() in include/app/QfPaths.h on every platform.
+# The two are one contract; if one changes, the other must change with it.
 # =============================================================================
 
 if (WIN32)
@@ -330,14 +329,11 @@ find_program(HF_CLI NAMES hf)
 if (HF_CLI)
 
     message(STATUS "Hugging Face CLI found: ${HF_CLI}")
-
     set(HF_AVAILABLE TRUE)
 
 else ()
 
-    message(STATUS "Hugging Face CLI not found.")
-    message(STATUS "Using CMake HTTP fallback.")
-
+    message(STATUS "Hugging Face CLI not found. Using CMake HTTP fallback.")
     set(HF_AVAILABLE FALSE)
 
 endif ()
@@ -607,108 +603,177 @@ message(STATUS "Embedding model directory: ${QF_EMBEDDING_DIR}")
 # 3G. HeadTTS
 # =============================================================================
 #
-# HeadTTS is a Node.js server that runs the timestamped Kokoro ONNX
-# model and returns native Oculus 15 visemes with per-phoneme timing.
+# HeadTTS is a Node.js server wrapping the timestamped Kokoro ONNX model.
+# It is cloned, installed, and configured once at configure time. The
+# absolute paths of the node binary and the HeadTTS directory are baked
+# into qf-inference as compile-time defaults; TtsManager reads them only
+# after checking QF_NODE_CLI and QF_HEADTTS_DIR at runtime.
 #
-# Install:
-#   1. Clone met4citizen/HeadTTS if not already present.
-#   2. Run npm install.
-#   3. Install ws, which headtts-node.mjs imports but package.json
-#      does not declare.
-#   4. Write a config file tuned for QF-ML.
-#
-# Runtime:
-#   TtsManager launches node directly by absolute path, with the
-#   HeadTTS entry module as its argument and the HeadTTS directory as
-#   the working directory. No shell, no npm, no PATH dependency.
-#
-#   The absolute paths of the node binary and the HeadTTS directory
-#   are baked into qf-inference as compile-time defines, so the built
-#   library knows where its own HeadTTS is without guessing from the
-#   executable's location.
-#
-#   If the compile-time paths are wrong, the environment variables
-#   QF_NODE_CLI and QF_HEADTTS_DIR override them at runtime.
+# Node discovery is platform-agnostic: find_program against PATH, plus
+# the standard Windows and nvm fallback locations. The nvm glob that used
+# to live here was Unix-only and silently disabled TTS on Windows.
 # =============================================================================
 
 set(
-        HEADTTS_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/external/HeadTTS"
+        QF_NODE_CLI
+        ""
+        CACHE FILEPATH
+        "Explicit path to the node binary (overrides PATH discovery)"
 )
 
-set(
-        HEADTTS_CONFIG
-        "${HEADTTS_DIR}/headtts-node.json"
-)
+set(HEADTTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/HeadTTS")
+set(HEADTTS_CONFIG "${HEADTTS_DIR}/headtts-node.json")
+set(HEADTTS_ENTRY "${HEADTTS_DIR}/modules/headtts-node.mjs")
+set(HEADTTS_NPM_SENTINEL "${HEADTTS_DIR}/node_modules/.package-lock.json")
+set(HEADTTS_WS_SENTINEL "${HEADTTS_DIR}/node_modules/ws")
+set(HEADTTS_CLONE_SENTINEL "${HEADTTS_DIR}/.git")
 
-set(
-        HEADTTS_ENTRY
-        "${HEADTTS_DIR}/modules/headtts-node.mjs"
-)
+# -----------------------------------------------------------------------------
+# Node discovery
+# -----------------------------------------------------------------------------
 
-set(
-        HEADTTS_NPM_SENTINEL
-        "${HEADTTS_DIR}/node_modules/.package-lock.json"
-)
+if (QF_NODE_CLI AND EXISTS "${QF_NODE_CLI}")
 
-set(
-        HEADTTS_WS_SENTINEL
-        "${HEADTTS_DIR}/node_modules/ws"
-)
+    set(NODE_CLI "${QF_NODE_CLI}")
 
-set(
-        HEADTTS_CLONE_SENTINEL
-        "${HEADTTS_DIR}/.git"
-)
+else ()
 
-find_program(
-        NODE_CLI
-        NAMES node
-        PATHS ${NVM_NODE_BINS}
-)
+    if (WIN32)
 
-find_program(
-        NPM_CLI
-        NAMES npm
-        PATHS ${NVM_NODE_BINS}
-)
-
-if (NODE_CLI AND NPM_CLI)
-
-    message(STATUS "Node.js found: ${NODE_CLI}")
-
-    # -------------------------------------------------------------------------
-    # Clone
-    # -------------------------------------------------------------------------
-
-    if (NOT EXISTS "${HEADTTS_CLONE_SENTINEL}")
-
-        message(STATUS "Cloning HeadTTS into ${HEADTTS_DIR}...")
-
-        execute_process(
-                COMMAND
-                git clone --depth 1
-                https://github.com/met4citizen/HeadTTS
-                "${HEADTTS_DIR}"
-
-                RESULT_VARIABLE clone_result
-                OUTPUT_VARIABLE clone_output
-                ERROR_VARIABLE clone_error
+        find_program(
+                NODE_CLI
+                NAMES node.exe node
+                PATHS
+                "$ENV{ProgramFiles}/nodejs"
+                "$ENV{APPDATA}/nvm"
+                "$ENV{LOCALAPPDATA}/nvm"
+                "$ENV{NVM_SYMLINK}"
         )
 
-        if (NOT clone_result EQUAL 0)
+    else ()
 
-            message(WARNING "Failed to clone HeadTTS.")
-            message(WARNING "stdout:\n${clone_output}")
-            message(WARNING "stderr:\n${clone_error}")
+        find_program(NODE_CLI NAMES node)
+
+        # Common nvm fallback for interactive shells that don't export PATH.
+        if (NOT NODE_CLI AND EXISTS "$ENV{HOME}/.nvm/versions/node")
+
+            file(
+                    GLOB
+                    NVM_NODE_BINS
+                    "$ENV{HOME}/.nvm/versions/node/*/bin"
+            )
+
+            list(SORT NVM_NODE_BINS COMPARE NATURAL ORDER DESCENDING)
+
+            foreach (BIN_DIR ${NVM_NODE_BINS})
+
+                if (EXISTS "${BIN_DIR}/node")
+
+                    set(NODE_CLI "${BIN_DIR}/node")
+                    break()
+
+                endif ()
+
+            endforeach ()
 
         endif ()
 
     endif ()
 
-    # -------------------------------------------------------------------------
-    # npm install
-    # -------------------------------------------------------------------------
+endif ()
+
+# -----------------------------------------------------------------------------
+# npm discovery: prefer a sibling of node, then PATH
+# -----------------------------------------------------------------------------
+
+if (NODE_CLI)
+
+    get_filename_component(NODE_BIN_DIR "${NODE_CLI}" DIRECTORY)
+
+    if (WIN32)
+
+        find_program(
+                NPM_CLI
+                NAMES npm.cmd npm
+                PATHS "${NODE_BIN_DIR}"
+                NO_DEFAULT_PATH
+        )
+
+    else ()
+
+        find_program(
+                NPM_CLI
+                NAMES npm
+                PATHS "${NODE_BIN_DIR}"
+                NO_DEFAULT_PATH
+        )
+
+    endif ()
+
+    if (NOT NPM_CLI)
+
+        if (WIN32)
+
+            find_program(NPM_CLI NAMES npm.cmd npm)
+
+        else ()
+
+            find_program(NPM_CLI NAMES npm)
+
+        endif ()
+
+    endif ()
+
+endif ()
+
+# -----------------------------------------------------------------------------
+# git is required only if HeadTTS is not already cloned
+# -----------------------------------------------------------------------------
+
+if (NOT EXISTS "${HEADTTS_CLONE_SENTINEL}")
+
+    find_program(GIT_CLI NAMES git)
+
+endif ()
+
+if (NODE_CLI AND NPM_CLI)
+
+    message(STATUS "Node.js found: ${NODE_CLI}")
+    message(STATUS "npm found:     ${NPM_CLI}")
+
+    if (NOT EXISTS "${HEADTTS_CLONE_SENTINEL}")
+
+        if (NOT GIT_CLI)
+
+            message(WARNING "git not found. Cannot clone HeadTTS.")
+            message(WARNING "Install git, or place HeadTTS at ${HEADTTS_DIR} manually.")
+
+        else ()
+
+            message(STATUS "Cloning HeadTTS into ${HEADTTS_DIR}...")
+
+            execute_process(
+                    COMMAND
+                    "${GIT_CLI}" clone --depth 1
+                    https://github.com/met4citizen/HeadTTS
+                    "${HEADTTS_DIR}"
+
+                    RESULT_VARIABLE clone_result
+                    OUTPUT_VARIABLE clone_output
+                    ERROR_VARIABLE clone_error
+            )
+
+            if (NOT clone_result EQUAL 0)
+
+                message(WARNING "Failed to clone HeadTTS.")
+                message(WARNING "stdout:\n${clone_output}")
+                message(WARNING "stderr:\n${clone_error}")
+
+            endif ()
+
+        endif ()
+
+    endif ()
 
     if (EXISTS "${HEADTTS_DIR}/package.json"
             AND NOT EXISTS "${HEADTTS_NPM_SENTINEL}")
@@ -717,8 +782,7 @@ if (NODE_CLI AND NPM_CLI)
 
         execute_process(
                 COMMAND
-                ${NPM_CLI}
-                install
+                "${NPM_CLI}" install
 
                 WORKING_DIRECTORY
                 "${HEADTTS_DIR}"
@@ -738,10 +802,6 @@ if (NODE_CLI AND NPM_CLI)
 
     endif ()
 
-    # -------------------------------------------------------------------------
-    # ws package
-    # -------------------------------------------------------------------------
-
     if (EXISTS "${HEADTTS_NPM_SENTINEL}"
             AND NOT EXISTS "${HEADTTS_WS_SENTINEL}")
 
@@ -749,9 +809,7 @@ if (NODE_CLI AND NPM_CLI)
 
         execute_process(
                 COMMAND
-                ${NPM_CLI}
-                install
-                ws
+                "${NPM_CLI}" install ws
 
                 WORKING_DIRECTORY
                 "${HEADTTS_DIR}"
@@ -770,10 +828,6 @@ if (NODE_CLI AND NPM_CLI)
         endif ()
 
     endif ()
-
-    # -------------------------------------------------------------------------
-    # Config
-    # -------------------------------------------------------------------------
 
     if (EXISTS "${HEADTTS_NPM_SENTINEL}"
             AND NOT EXISTS "${HEADTTS_CONFIG}")
@@ -809,10 +863,6 @@ if (NODE_CLI AND NPM_CLI)
 
     endif ()
 
-    # -------------------------------------------------------------------------
-    # Status
-    # -------------------------------------------------------------------------
-
     if (EXISTS "${HEADTTS_ENTRY}")
 
         message(STATUS "")
@@ -829,12 +879,12 @@ if (NODE_CLI AND NPM_CLI)
 else ()
 
     message(STATUS "Node.js or npm not found. HeadTTS will not be installed.")
-    message(STATUS "Install Node.js v20 or later, then re-run CMake.")
+    message(STATUS "Install Node.js v20 or later, or pass -DQF_NODE_CLI=/path/to/node.")
 
 endif ()
 
 # =============================================================================
-# 4. OCR Libraries
+# 4. OCR libraries
 # =============================================================================
 
 find_package(PkgConfig QUIET)
@@ -926,30 +976,28 @@ target_include_directories(
 # -----------------------------------------------------------------------------
 # HeadTTS launch paths.
 #
-# The absolute paths of the node binary and the HeadTTS directory are
-# baked into the library at compile time. TtsManager reads them as the
-# fallback after the QF_NODE_CLI and QF_HEADTTS_DIR environment
-# variables. This is what makes the launch robust: the build system
-# records the paths when they are genuinely known, rather than the
-# runtime guessing from the binary's location or relying on PATH.
-#
-# Guarded by EXISTS checks so a tree without HeadTTS still builds.
+# Backslashes in target_compile_definitions are a quoting hazard on Windows,
+# so normalise to forward slashes. Qt accepts forward slashes in QProcess
+# arguments on all platforms.
 # -----------------------------------------------------------------------------
 
 if (EXISTS "${HEADTTS_ENTRY}" AND NODE_CLI)
+
+    file(TO_CMAKE_PATH "${NODE_CLI}" NODE_CLI_FWD)
+    file(TO_CMAKE_PATH "${HEADTTS_DIR}" HEADTTS_DIR_FWD)
 
     target_compile_definitions(
             qf-inference
 
             PRIVATE
 
-            QF_NODE_CLI_DEFAULT="${NODE_CLI}"
-            QF_HEADTTS_DIR_DEFAULT="${HEADTTS_DIR}"
+            QF_NODE_CLI_DEFAULT="${NODE_CLI_FWD}"
+            QF_HEADTTS_DIR_DEFAULT="${HEADTTS_DIR_FWD}"
     )
 
     message(STATUS "HeadTTS launch paths baked into qf-inference:")
-    message(STATUS "  QF_NODE_CLI_DEFAULT=${NODE_CLI}")
-    message(STATUS "  QF_HEADTTS_DIR_DEFAULT=${HEADTTS_DIR}")
+    message(STATUS "  QF_NODE_CLI_DEFAULT=${NODE_CLI_FWD}")
+    message(STATUS "  QF_HEADTTS_DIR_DEFAULT=${HEADTTS_DIR_FWD}")
 
 else ()
 
@@ -972,10 +1020,10 @@ target_link_libraries(
         avfilter
         avformat
         avutil
+
         PRIVATE
 
         nemo_speech_asr_c
-
         ONNXRuntime::ONNXRuntime
 
         ${TESSERACT_LIBRARIES}
@@ -1006,7 +1054,6 @@ target_link_libraries(
         PRIVATE
 
         qf-inference
-
         Qt6::WebChannel
 )
 
@@ -1196,6 +1243,7 @@ message(STATUS "QF-ML configuration")
 message(STATUS "============================================================")
 message(STATUS "CMake:       ${CMAKE_VERSION}")
 message(STATUS "Build type:  ${CMAKE_BUILD_TYPE}")
+message(STATUS "Platform:    ${CMAKE_SYSTEM_NAME} / ${CMAKE_SYSTEM_PROCESSOR}")
 message(STATUS "ASR runtime: NeMo-Speech.cpp")
 message(STATUS "ASR model:   ${QF_STT_MODEL}")
 message(STATUS "ASR file:    ${QF_STT_MODEL_PATH}")
