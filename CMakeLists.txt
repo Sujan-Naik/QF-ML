@@ -9,6 +9,8 @@ if (POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif ()
 
+option(QF_ML_BUILD_DEMO "Build the qf-ml-demo executable" ON)
+
 # ============================================================================
 # Qt
 # ============================================================================
@@ -81,7 +83,7 @@ set(NEMO_SPEECH_WITH_NORM OFF CACHE BOOL "" FORCE)
 set(NEMO_SPEECH_TTS_WITH_JA OFF CACHE BOOL "" FORCE)
 set(NEMO_SPEECH_TTS_WITH_ZH OFF CACHE BOOL "" FORCE)
 
-if (APPLE)
+if (APPLE OR WIN32)
     set(GGML_VULKAN OFF CACHE BOOL "Enable ggml Vulkan backend" FORCE)
 else ()
     set(GGML_VULKAN ON CACHE BOOL "Enable ggml Vulkan backend" FORCE)
@@ -96,13 +98,6 @@ include_directories(
 
 # =============================================================================
 # 1A. Vulkan-Headers compatibility patch
-# =============================================================================
-#
-# Debian 12 ships Vulkan-Hpp headers predating VK_EXT_layer_settings.
-# The vendored ggml Vulkan backend uses vk::LayerSettingEXT unconditionally,
-# which fails to compile on those headers. The extension is optional, so when
-# the headers do not expose it, fall back to a plain vk::InstanceCreateInfo.
-# No-op once Vulkan-Hpp catches up.
 # =============================================================================
 
 set(
@@ -290,10 +285,6 @@ set_target_properties(
 
 # =============================================================================
 # 3. Shared QF data directory
-# =============================================================================
-#
-# Must match QFPaths::dataRoot() in include/app/QfPaths.h on every platform.
-# The two are one contract; if one changes, the other must change with it.
 # =============================================================================
 
 if (WIN32)
@@ -606,17 +597,6 @@ message(STATUS "Embedding model directory: ${QF_EMBEDDING_DIR}")
 # =============================================================================
 # 3G. HeadTTS
 # =============================================================================
-#
-# HeadTTS is a Node.js server wrapping the timestamped Kokoro ONNX model.
-# It is cloned, installed, and configured once at configure time. The
-# absolute paths of the node binary and the HeadTTS directory are baked
-# into qf-inference as compile-time defaults; TtsManager reads them only
-# after checking QF_NODE_CLI and QF_HEADTTS_DIR at runtime.
-#
-# Node discovery is platform-agnostic: find_program against PATH, plus
-# the standard Windows and nvm fallback locations. The nvm glob that used
-# to live here was Unix-only and silently disabled TTS on Windows.
-# =============================================================================
 
 set(
         QF_NODE_CLI
@@ -631,10 +611,6 @@ set(HEADTTS_ENTRY "${HEADTTS_DIR}/modules/headtts-node.mjs")
 set(HEADTTS_NPM_SENTINEL "${HEADTTS_DIR}/node_modules/.package-lock.json")
 set(HEADTTS_WS_SENTINEL "${HEADTTS_DIR}/node_modules/ws")
 set(HEADTTS_CLONE_SENTINEL "${HEADTTS_DIR}/.git")
-
-# -----------------------------------------------------------------------------
-# Node discovery
-# -----------------------------------------------------------------------------
 
 if (QF_NODE_CLI AND EXISTS "${QF_NODE_CLI}")
 
@@ -658,7 +634,6 @@ else ()
 
         find_program(NODE_CLI NAMES node)
 
-        # Common nvm fallback for interactive shells that don't export PATH.
         if (NOT NODE_CLI AND EXISTS "$ENV{HOME}/.nvm/versions/node")
 
             file(
@@ -685,10 +660,6 @@ else ()
     endif ()
 
 endif ()
-
-# -----------------------------------------------------------------------------
-# npm discovery: prefer a sibling of node, then PATH
-# -----------------------------------------------------------------------------
 
 if (NODE_CLI)
 
@@ -729,10 +700,6 @@ if (NODE_CLI)
     endif ()
 
 endif ()
-
-# -----------------------------------------------------------------------------
-# git is required only if HeadTTS is not already cloned
-# -----------------------------------------------------------------------------
 
 if (NOT EXISTS "${HEADTTS_CLONE_SENTINEL}")
 
@@ -1004,14 +971,6 @@ target_include_directories(
         "${NEMO_SPEECH_SOURCE_DIR}/include"
 )
 
-# -----------------------------------------------------------------------------
-# HeadTTS launch paths.
-#
-# Backslashes in target_compile_definitions are a quoting hazard on Windows,
-# so normalise to forward slashes. Qt accepts forward slashes in QProcess
-# arguments on all platforms.
-# -----------------------------------------------------------------------------
-
 if (EXISTS "${HEADTTS_ENTRY}" AND NODE_CLI)
 
     file(TO_CMAKE_PATH "${NODE_CLI}" NODE_CLI_FWD)
@@ -1048,18 +1007,42 @@ target_link_libraries(
         Qt6::Multimedia
         Qt6::TextToSpeech
         Qt6::WebSockets
-        ${AVFILTER_LIBRARIES}
-        ${AVFORMAT_LIBRARIES}
-        ${AVUTIL_LIBRARIES}
 
         PRIVATE
 
         nemo_speech_asr_c
         ONNXRuntime::ONNXRuntime
-
-        ${TESSERACT_LIBRARIES}
-        ${LEPTONICA_LIBRARIES}
 )
+
+if (TESSERACT_FOUND)
+    target_link_libraries(qf-inference PUBLIC ${TESSERACT_LINK_LIBRARIES})
+else ()
+    target_link_libraries(qf-inference PUBLIC ${TESSERACT_LIBRARIES})
+endif ()
+
+if (LEPTONICA_FOUND)
+    target_link_libraries(qf-inference PUBLIC ${LEPTONICA_LINK_LIBRARIES})
+else ()
+    target_link_libraries(qf-inference PUBLIC ${LEPTONICA_LIBRARIES})
+endif ()
+
+if (AVFILTER_FOUND)
+    target_link_libraries(qf-inference PUBLIC ${AVFILTER_LINK_LIBRARIES})
+else ()
+    target_link_libraries(qf-inference PUBLIC ${AVFILTER_LIBRARIES})
+endif ()
+
+if (AVFORMAT_FOUND)
+    target_link_libraries(qf-inference PUBLIC ${AVFORMAT_LINK_LIBRARIES})
+else ()
+    target_link_libraries(qf-inference PUBLIC ${AVFORMAT_LIBRARIES})
+endif ()
+
+if (AVUTIL_FOUND)
+    target_link_libraries(qf-inference PUBLIC ${AVUTIL_LINK_LIBRARIES})
+else ()
+    target_link_libraries(qf-inference PUBLIC ${AVUTIL_LIBRARIES})
+endif ()
 
 add_dependencies(
         qf-inference
@@ -1067,152 +1050,57 @@ add_dependencies(
 )
 
 # =============================================================================
-# 6. qf-ml-demo
+# 6. qf-ml-demo (optional)
 # =============================================================================
 
-qt_add_executable(
-        qf-ml-demo
+if (QF_ML_BUILD_DEMO)
 
-        src/main.cpp
+    qt_add_executable(
+            qf-ml-demo
 
-        include/app/RuntimeManager.h
-        src/app/RuntimeManager.cpp
-)
+            src/main.cpp
 
-target_link_libraries(
-        qf-ml-demo
-
-        PRIVATE
-
-        qf-inference
-        Qt6::WebChannel
-)
-
-set_target_properties(
-        qf-ml-demo
-
-        PROPERTIES
-
-        RUNTIME_OUTPUT_DIRECTORY
-        "${CMAKE_BINARY_DIR}/bin"
-
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG
-        "${CMAKE_BINARY_DIR}/bin"
-
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE
-        "${CMAKE_BINARY_DIR}/bin"
-
-        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO
-        "${CMAKE_BINARY_DIR}/bin"
-
-        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL
-        "${CMAKE_BINARY_DIR}/bin"
-)
-
-# =============================================================================
-# 7. Runtime deployment
-# =============================================================================
-
-if (WIN32)
-
-    if (EXISTS "${ONNXRUNTIME_DLL}")
-
-        add_custom_command(
-                TARGET qf-ml-demo
-                POST_BUILD
-
-                COMMAND
-                ${CMAKE_COMMAND} -E copy_if_different
-                "${ONNXRUNTIME_DLL}"
-                "$<TARGET_FILE_DIR:qf-ml-demo>/onnxruntime.dll"
-        )
-
-    endif ()
-
-elseif (APPLE)
-
-    foreach (dylib ${ONNXRUNTIME_DYLIBS})
-
-        add_custom_command(
-                TARGET qf-ml-demo
-                POST_BUILD
-
-                COMMAND
-                ${CMAKE_COMMAND} -E copy_if_different
-                "${dylib}"
-                "$<TARGET_FILE_DIR:qf-ml-demo>/"
-        )
-
-    endforeach ()
-
-else ()
-
-    foreach (solib ${ONNXRUNTIME_SOLIBS})
-
-        add_custom_command(
-                TARGET qf-ml-demo
-                POST_BUILD
-
-                COMMAND
-                ${CMAKE_COMMAND} -E copy_if_different
-                "${solib}"
-                "$<TARGET_FILE_DIR:qf-ml-demo>/"
-        )
-
-    endforeach ()
-
-endif ()
-
-if (TARGET nemo_speech_asr_c)
-
-    add_custom_command(
-            TARGET qf-ml-demo
-            POST_BUILD
-
-            COMMAND
-            ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:nemo_speech_asr_c>"
-            "$<TARGET_FILE_DIR:qf-ml-demo>"
+            include/app/RuntimeManager.h
+            src/app/RuntimeManager.cpp
     )
 
-endif ()
+    target_link_libraries(
+            qf-ml-demo
 
-if (TARGET nemo_speech_asr)
+            PRIVATE
 
-    add_custom_command(
-            TARGET qf-ml-demo
-            POST_BUILD
-
-            COMMAND
-            ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:nemo_speech_asr>"
-            "$<TARGET_FILE_DIR:qf-ml-demo>"
+            qf-inference
+            Qt6::WebChannel
     )
 
-endif ()
+    set_target_properties(
+            qf-ml-demo
 
-if (TARGET ggml-vulkan)
+            PROPERTIES
 
-    add_custom_command(
-            TARGET qf-ml-demo
-            POST_BUILD
+            RUNTIME_OUTPUT_DIRECTORY
+            "${CMAKE_BINARY_DIR}/bin"
 
-            COMMAND
-            ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:ggml-vulkan>"
-            "$<TARGET_FILE_DIR:qf-ml-demo>"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG
+            "${CMAKE_BINARY_DIR}/bin"
+
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE
+            "${CMAKE_BINARY_DIR}/bin"
+
+            RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO
+            "${CMAKE_BINARY_DIR}/bin"
+
+            RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL
+            "${CMAKE_BINARY_DIR}/bin"
     )
 
-endif ()
+    # =========================================================================
+    # 7. Runtime deployment
+    # =========================================================================
 
-foreach (NEMO_TARGET ggml ggml-base ggml-cpu ggml-vulkan)
+    if (WIN32)
 
-    if (TARGET ${NEMO_TARGET})
-
-        get_target_property(NEMO_TARGET_TYPE ${NEMO_TARGET} TYPE)
-
-        if (NEMO_TARGET_TYPE STREQUAL "SHARED_LIBRARY"
-                OR NEMO_TARGET_TYPE STREQUAL "MODULE_LIBRARY")
+        if (EXISTS "${ONNXRUNTIME_DLL}")
 
             add_custom_command(
                     TARGET qf-ml-demo
@@ -1220,49 +1108,148 @@ foreach (NEMO_TARGET ggml ggml-base ggml-cpu ggml-vulkan)
 
                     COMMAND
                     ${CMAKE_COMMAND} -E copy_if_different
-                    "$<TARGET_FILE:${NEMO_TARGET}>"
-                    "$<TARGET_FILE_DIR:qf-ml-demo>"
+                    "${ONNXRUNTIME_DLL}"
+                    "$<TARGET_FILE_DIR:qf-ml-demo>/onnxruntime.dll"
             )
 
         endif ()
 
+    elseif (APPLE)
+
+        foreach (dylib ${ONNXRUNTIME_DYLIBS})
+
+            add_custom_command(
+                    TARGET qf-ml-demo
+                    POST_BUILD
+
+                    COMMAND
+                    ${CMAKE_COMMAND} -E copy_if_different
+                    "${dylib}"
+                    "$<TARGET_FILE_DIR:qf-ml-demo>/"
+            )
+
+        endforeach ()
+
+    else ()
+
+        foreach (solib ${ONNXRUNTIME_SOLIBS})
+
+            add_custom_command(
+                    TARGET qf-ml-demo
+                    POST_BUILD
+
+                    COMMAND
+                    ${CMAKE_COMMAND} -E copy_if_different
+                    "${solib}"
+                    "$<TARGET_FILE_DIR:qf-ml-demo>/"
+            )
+
+        endforeach ()
+
     endif ()
 
-endforeach ()
+    if (TARGET nemo_speech_asr_c)
 
-# =============================================================================
-# 8. RPATH
-# =============================================================================
+        add_custom_command(
+                TARGET qf-ml-demo
+                POST_BUILD
 
-if (UNIX AND NOT APPLE)
+                COMMAND
+                ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:nemo_speech_asr_c>"
+                "$<TARGET_FILE_DIR:qf-ml-demo>"
+        )
 
-    set_target_properties(
-            qf-ml-demo
+    endif ()
 
-            PROPERTIES
+    if (TARGET nemo_speech_asr)
 
-            BUILD_RPATH
-            "$ORIGIN;${onnxruntime_prebuilt_SOURCE_DIR}/lib"
+        add_custom_command(
+                TARGET qf-ml-demo
+                POST_BUILD
 
-            INSTALL_RPATH
-            "$ORIGIN"
-    )
+                COMMAND
+                ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:nemo_speech_asr>"
+                "$<TARGET_FILE_DIR:qf-ml-demo>"
+        )
 
-elseif (APPLE)
+    endif ()
 
-    set_target_properties(
-            qf-ml-demo
+    if (TARGET ggml-vulkan)
 
-            PROPERTIES
+        add_custom_command(
+                TARGET qf-ml-demo
+                POST_BUILD
 
-            BUILD_RPATH
-            "@loader_path;${onnxruntime_prebuilt_SOURCE_DIR}/lib"
+                COMMAND
+                ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:ggml-vulkan>"
+                "$<TARGET_FILE_DIR:qf-ml-demo>"
+        )
 
-            INSTALL_RPATH
-            "@loader_path"
-    )
+    endif ()
 
-endif ()
+    foreach (NEMO_TARGET ggml ggml-base ggml-cpu ggml-vulkan)
+
+        if (TARGET ${NEMO_TARGET})
+
+            get_target_property(NEMO_TARGET_TYPE ${NEMO_TARGET} TYPE)
+
+            if (NEMO_TARGET_TYPE STREQUAL "SHARED_LIBRARY"
+                    OR NEMO_TARGET_TYPE STREQUAL "MODULE_LIBRARY")
+
+                add_custom_command(
+                        TARGET qf-ml-demo
+                        POST_BUILD
+
+                        COMMAND
+                        ${CMAKE_COMMAND} -E copy_if_different
+                        "$<TARGET_FILE:${NEMO_TARGET}>"
+                        "$<TARGET_FILE_DIR:qf-ml-demo>"
+                )
+
+            endif ()
+
+        endif ()
+
+    endforeach ()
+
+    # =========================================================================
+    # 8. RPATH
+    # =========================================================================
+
+    if (UNIX AND NOT APPLE)
+
+        set_target_properties(
+                qf-ml-demo
+
+                PROPERTIES
+
+                BUILD_RPATH
+                "$ORIGIN;${onnxruntime_prebuilt_SOURCE_DIR}/lib"
+
+                INSTALL_RPATH
+                "$ORIGIN"
+        )
+
+    elseif (APPLE)
+
+        set_target_properties(
+                qf-ml-demo
+
+                PROPERTIES
+
+                BUILD_RPATH
+                "@loader_path;${onnxruntime_prebuilt_SOURCE_DIR}/lib"
+
+                INSTALL_RPATH
+                "@loader_path"
+        )
+
+    endif ()
+
+endif ()  # QF_ML_BUILD_DEMO
 
 # =============================================================================
 # 9. Configuration summary
@@ -1279,7 +1266,7 @@ message(STATUS "ASR runtime: NeMo-Speech.cpp")
 message(STATUS "ASR model:   ${QF_STT_MODEL}")
 message(STATUS "ASR file:    ${QF_STT_MODEL_PATH}")
 message(STATUS "Vulkan:      ${GGML_VULKAN}")
-message(STATUS "Demo target: qf-ml-demo")
+message(STATUS "Demo target: $<IF:$<BOOL:${QF_ML_BUILD_DEMO}>,qf-ml-demo,disabled>")
 
 if (NODE_CLI AND NPM_CLI AND EXISTS "${HEADTTS_ENTRY}")
 
