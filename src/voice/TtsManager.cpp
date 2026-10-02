@@ -100,9 +100,15 @@ QByteArray pitchShift(const QByteArray &input, int sampleRate,
     return input;
   }
 
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+  const QString srcArgs = QStringLiteral(
+      "time_base=1/%1:sample_rate=%1:sample_fmt=fltp:ch_layout=mono")
+      .arg(sampleRate);
+#else
   const QString srcArgs = QStringLiteral(
       "time_base=1/%1:sample_rate=%1:sample_fmt=fltp:channel_layout=mono")
       .arg(sampleRate);
+#endif
 
   AVFilterContext *srcCtx = nullptr;
   AVFilterContext *sinkCtx = nullptr;
